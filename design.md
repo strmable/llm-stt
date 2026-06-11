@@ -981,15 +981,16 @@ OpenAI Chat Completions의 `input_audio` content type을 모든 "OpenAI 호환" 
 | 항목 | 상태 | 근거 |
 | --- | --- | --- |
 | Gemma 4 12B의 native audio input 지원 | ✅ 확인됨 | Google 공식 블로그: encoder 제거, 오디오를 텍스트 토큰과 동일 차원으로 projection |
-| LM Studio `/v1/chat/completions`의 `input_audio` 지원 | ❌ 미확인 (미지원 추정) | 공식 문서에 필드 자체가 없음, 관련 이슈 Open |
-| Ollama `/v1/chat/completions`(OpenAI 호환)의 `input_audio` 지원 | ❌ 미확인 (미지원 추정) | 오디오 필드 추가 PR(#15243)이 아직 미병합 |
-| `data:audio/wav;base64,...` 형태의 Data URL 사용 | ❌ 근거 없음 | OpenAI 공식 스펙은 prefix 없는 순수 base64를 요구. 인터넷에서 발견된 "LM Studio + Gemma 4 12B" 예시 코드의 Data URL 포맷은 출처 불명 |
+| llama.cpp `llama-server`의 `/v1/chat/completions` `input_audio` 지원 (Gemma 4 + `gemma4uv` mmproj) | ⚠️ 조건부 확인됨 (실험적) | `ggml-org/llama.cpp` 공식 저장소: `libmtmd` 기반으로 `llama-server`가 OpenAI 호환 `/chat/completions`에서 이미지/오디오 입력을 지원. 단, "highly experimental, reduced quality" 명시. 통합 mmproj `gemma4uv`(vision+audio) 로드 시 동작하나, 관련 크래시(SIGABRT/SIGFPE) 수정 PR `#24118`이 **2026-06-04에야 병합**됨 — 매우 최근 변경 |
+| LM Studio `/v1/chat/completions`의 `input_audio` 지원 | ⚠️ 불확실 (버전 의존) | LM Studio는 내부적으로 llama.cpp를 번들링하므로 이론상 위 llama.cpp 변경사항을 받으면 지원 가능하나, `#24118`이 병합된 지 1주일(2026-06-11 기준)밖에 되지 않아 LM Studio가 이 커밋을 포함한 빌드를 배포했는지는 공식 changelog로 확인되지 않음. 공식 LM Studio Chat Completions 문서에는 여전히 `input_audio` 관련 언급이 없음 |
+| Ollama `/v1/chat/completions`(OpenAI 호환)의 `input_audio` 지원 | ❌ 미지원 | 오디오는 자체 API(`/api/chat`)용 `audio`/`audios` 필드 추가 PR(`#15243`)이 아직 미병합. OpenAI 호환 레이어는 오디오 필드 자체가 없음 |
+| `data:audio/wav;base64,...` 형태의 Data URL 사용 | ❌ 근거 없음 | OpenAI 공식 스펙 및 llama.cpp 문서 모두 prefix 없는 순수 base64 + `format` 필드를 사용. Data URL 포맷은 출처 불명 |
 | vLLM OpenAI 호환 서버의 오디오 입력 지원 | ❌ 미지원 보고됨 | vLLM GitHub 이슈 #19977 |
 
 #### 설계상 결론 / 권고
 
-1. 본 프로그램은 OpenAI 공식 스펙(prefix 없는 base64 + `format: "wav"`)을 1차 구현 대상으로 한다.
-2. 다만 위 표에서 보듯 어떤 로컬 서버도 이 스펙으로 오디오 입력을 받는다는 것이 공식적으로 보장되지 않으므로, **구현 단계에서 사용자가 실제로 사용할 로컬 서버(LM Studio / Ollama / 커스텀 vLLM 등)에 대해 실제 HTTP 요청을 보내 응답을 확인하는 런타임 검증이 필수**다.
-3. 만약 실제 서버가 다른 포맷(예: Data URL prefix, 별도 `audio`/`audios` 필드, 별도 엔드포인트)을 요구하는 것으로 확인되면, `local_api` 설정에 `request_format` 또는 유사한 옵션을 추가하여 포맷을 선택할 수 있도록 확장한다 (현재 §8 config.json에는 미반영, 향후 확장 항목으로 §21에 추가 권장).
-4. Local API Provider는 "표준 스펙을 따르는 호환 서버가 준비되어 있다"는 전제하에 동작하는 기능이며, 특정 서버(LM Studio/Ollama 등)에 대한 동작을 보증하지 않는다는 점을 README/설정 화면 안내 문구에 명시한다.
-khshim
+1. 본 프로그램은 OpenAI 공식 스펙(prefix 없는 base64 + `format: "wav"`)을 1차 구현 대상으로 한다. 이 스펙은 llama.cpp `llama-server`(최신 빌드 + Gemma 4 `gemma4uv` mmproj)에서 동작이 확인된 형식과도 일치한다.
+2. 다만 "최신 빌드"라는 전제 자체가 매우 빠르게 변하는 영역(관련 핵심 수정이 1주일 전에야 병합)이므로, **구현 단계에서 사용자가 실제로 사용할 로컬 서버(llama-server / LM Studio / Ollama 등)에 대해 실제 HTTP 요청을 보내 응답을 확인하는 런타임 검증이 필수**다.
+3. Ollama는 현재 시점(2026-06)에 OpenAI 호환 레이어로 오디오 입력이 불가능하므로, Local API Provider 대상에서 제외하거나 "현재 미지원"으로 안내한다.
+4. 만약 실제 서버가 다른 포맷(예: Data URL prefix, 별도 `audio`/`audios` 필드, 별도 엔드포인트)을 요구하는 것으로 확인되면, `local_api` 설정에 `request_format` 또는 유사한 옵션을 추가하여 포맷을 선택할 수 있도록 확장한다 (현재 §8 config.json에는 미반영, 향후 확장 항목으로 §21에 추가 권장).
+5. Local API Provider는 "표준 스펙을 따르는 호환 서버(예: 최신 llama.cpp `llama-server` + `gemma4uv` mmproj)가 준비되어 있다"는 전제하에 동작하는 기능이며, 특정 서버(LM Studio/Ollama 등)에 대한 동작을 보증하지 않는다는 점을 README/설정 화면 안내 문구에 명시한다. 오디오 입력은 llama.cpp 자체에서도 "experimental"로 표기되어 있으므로 인식 품질 저하 가능성을 사용자에게 알린다.
