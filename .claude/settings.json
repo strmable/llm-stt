@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(git commit -m ' *)",
+      "PowerShell(try { \\(Invoke-WebRequest -Uri http://127.0.0.1:8080/health -UseBasicParsing -TimeoutSec 5\\).Content } catch { \"DOWN: $_\" })",
+      "Bash(python \"C:\\\\Users\\\\khshim\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-khshim-Proj-llm-stt\\\\7b2dd673-dcfc-4924-9a55-abd2b8a7b400\\\\scratchpad\\\\compare_language_hint.py\")",
+      "Bash(python tools/fetch_samples.py --lang ko --count 3)"
+    ]
+  }
+}
