@@ -16,6 +16,7 @@ import argparse
 import base64
 import json
 import sys
+import unicodedata
 from pathlib import Path
 
 import requests
@@ -25,9 +26,19 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 LANG_NAMES = {"ko": "Korean", "ja": "Japanese", "zh": "Chinese"}
 
 
+def normalize(text: str) -> str:
+    # FLEURS ref transcriptions omit punctuation entirely (and space CJK
+    # characters individually), while the model outputs natural punctuation.
+    # Strip whitespace and all Unicode punctuation (category "P*") from both
+    # sides before diffing so CER reflects transcription errors, not this
+    # formatting mismatch. Numeral-style mismatches (200만 vs 이백만) aren't
+    # normalized here since there's no reliable rule-based mapping.
+    return "".join(ch for ch in text if not ch.isspace() and not unicodedata.category(ch).startswith("P"))
+
+
 def cer(ref: str, hyp: str) -> float:
-    ref = ref.replace(" ", "")
-    hyp = hyp.replace(" ", "")
+    ref = normalize(ref)
+    hyp = normalize(hyp)
     n, m = len(ref), len(hyp)
     if n == 0:
         return 0.0 if m == 0 else 1.0
