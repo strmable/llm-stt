@@ -22,6 +22,7 @@
   - 임의 오디오 파일(ffmpeg가 읽을 수 있는 포맷)을 16kHz mono WAV로 변환
   - base64 인코딩 후 [design.md](design.md) §10.1 포맷(OpenAI 호환 `input_audio`)으로 `/v1/chat/completions`에 POST
   - 응답 텍스트와 소요 시간(초) 출력
+- VRAM 실측 및 튜닝: 플래그 없이 `-hf`만으로 띄우면 `/props` 확인 결과 `n_ctx=65536`, `total_slots=4`가 기본값으로 잡혀 VRAM을 10GB 이상 소모(`nvidia-smi` 실측, RTX 5070 Ti 16GB 중 12GB 사용). 30초 Chunk 정책에는 그런 큰 컨텍스트가 불필요하므로 `--ctx-size 4096 --parallel 1 --cache-type-k q8_0 --cache-type-v q8_0`로 줄여서 재기동 → VRAM 약 4GB로 감소 확인. 튜닝된 커맨드는 [design.md](design.md#L218) §6.1에 반영.
 - 아직 실제 오디오 샘플로 전사는 시도하지 않음 — 테스트용 한국어 샘플 준비 대기 중.
 
 ---
