@@ -13,6 +13,10 @@ import tempfile
 import time
 from pathlib import Path
 
+# Windows consoles are often cp949/cp1252 etc. and will raise UnicodeEncodeError
+# on Korean/Japanese/Chinese transcriptions otherwise.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import requests
 
 DEFAULT_PROMPT = "Transcribe this audio."
