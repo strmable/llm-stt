@@ -22,9 +22,10 @@ from .settings_dialog import SettingsDialog
 from .worker import TranscriptionWorker
 
 SUPPORTED_EXTENSIONS = {
-    ".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg",  # design.md SS4 audio
-    ".mp4", ".mkv", ".webm", ".mov", ".avi",  # design.md SS4 video
-}
+    ".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg", ".wma", ".opus",  # design.md SS4 audio
+    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".mpg", ".mpeg", ".wmv", ".ts", ".m2ts", ".3gp",  # SS4 video
+}  # extract_audio.py just calls ffmpeg -i, which reads far more than SS4's original
+   # example list -- these are the other containers actually asked for/commonly seen.
 
 
 class MainWindow(QMainWindow):

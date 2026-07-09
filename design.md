@@ -63,8 +63,8 @@ GUI와 콘솔을 동시에 사용하는 Hybrid 구조.
 
 ## 4. 지원 입력 형식
 
-* Audio: wav, mp3, aac, m4a, flac, ogg
-* Video: mp4, mkv, webm, mov, avi
+* Audio: wav, mp3, aac, m4a, flac, ogg, wma, opus
+* Video: mp4, mkv, webm, mov, avi, mpg, mpeg, wmv, ts, m2ts, 3gp
 
 사용자는 별도 변환 작업 없이 파일을 바로 입력할 수 있어야 한다.
 
