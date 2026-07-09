@@ -36,8 +36,9 @@
 
 ## Stage 2a. VAD Raw 확인
 
-### 코드 산출물 (이미 작성함: `vad_raw_test.py`)
-- 입력: Stage 1 산출물 WAV
+### 코드 산출물 
+- `vad_raw_test.py` (1stage 프로그램을 확장)
+- 입력: 임의 미디어 파일 경로
 - 출력:
   - 콘솔 로그: raw segment 목록(시작/끝/길이), 구간 길이·침묵 길이 통계
   - `*_vad_raw.png`: 파형 + speech 확률 곡선 + raw segment 하이라이트
