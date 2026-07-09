@@ -28,7 +28,7 @@ PIPELINE_DIR = REPO_ROOT / "pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
 from common import compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
-from transcribe_chunks import check_server  # noqa: E402
+from server_manager import is_server_up  # noqa: E402
 
 # line_buffering=True: without it, stdout is fully block-buffered whenever
 # it isn't a real terminal (redirected to a file, captured by a wrapper,
@@ -77,9 +77,15 @@ def main():
         sys.exit(f"File not found: {args.source}")
 
     # Fail fast before spending time on extraction/VAD/chunking if the STT
-    # backend isn't even reachable -- transcribe_chunks.py checks this too,
-    # but only after stages 1-2 have already run.
-    check_server(args.server)
+    # backend isn't reachable AND won't be self-started later -- in managed
+    # mode transcribe_chunks.py starts it itself right before Stage 3
+    # (design.md SS6.3: server lifecycle is scoped to Phase B, not the whole
+    # job), so there's nothing useful to check this early in that case.
+    launch_mode = load_config().get("local_api", {}).get("launch_mode", "external")
+    if launch_mode != "managed" and not is_server_up(args.server):
+        sys.exit(f"llama-server not reachable at {args.server} and local_api.launch_mode is "
+                 f"{launch_mode!r} (not \"managed\") -- start it first (SETUP.MD SS2/TESTING.md SS1), "
+                 f"or set local_api.launch_mode to \"managed\" in config.json.")
 
     job_id = compute_job_id(args.source)
     job_dir_path = get_job_dir(args.source)

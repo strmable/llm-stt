@@ -10,9 +10,10 @@
     "server_binary": "",
     "model_path": "",
     "mmproj_path": "",
+    "hf_repo": "ggml-org/Qwen3-ASR-1.7B-GGUF",
     "managed": {
       "port": 8080,
-      "extra_args": "",
+      "extra_args": "--ctx-size 4096 --parallel 1 --cache-type-k q8_0 --cache-type-v q8_0",
       "startup_timeout_sec": 120
     }
   },

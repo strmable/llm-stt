@@ -28,6 +28,9 @@ from pathlib import Path
 
 import requests
 
+from common import load_config
+from server_manager import ensure_llama_server
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 DEFAULT_SERVER = "http://localhost:8080"
@@ -89,45 +92,8 @@ def transcribe_one(server: str, model: str, prompt: str, wav_path: Path, tempera
     return {"elapsed": elapsed, "raw": content}
 
 
-def check_server(server: str) -> None:
-    try:
-        resp = requests.get(f"{server.rstrip('/')}/health", timeout=5)
-        resp.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        sys.exit(f"llama-server not reachable at {server} ({e}). "
-                 f"Start it first (SETUP.MD SS2/TESTING.md SS1) before running Stage 3.")
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("job", type=Path, help="job directory (temp/{job_id}) or its manifest.json")
-    ap.add_argument("--server", default=DEFAULT_SERVER, help="llama-server base URL")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help="model field sent in the request body")
-    ap.add_argument("--language", default="auto",
-                     help="'auto' (default, no hint) or a language code e.g. 'ko' (design.md SS5A.8)")
-    ap.add_argument("--temperature", type=float, default=1.0, help="design.md SS6.1 default")
-    ap.add_argument("--timeout", type=float, default=120.0, help="per-request timeout in seconds")
-    ap.add_argument("--force", action="store_true",
-                     help="re-transcribe chunks already marked 'transcribed' (default: skip them, resume-style)")
-    args = ap.parse_args()
-
-    manifest_path = resolve_manifest_path(args.job)
-    if not manifest_path.exists():
-        sys.exit(f"manifest.json not found: {manifest_path} (run Stage 2c chunk_export.py first)")
-
-    check_server(args.server)
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    job_dir = manifest_path.parent
-    prompt = build_prompt(args.language)
-    print(f"[transcribe] server={args.server} model={args.model} language={args.language} "
-          f"prompt={prompt!r}")
-
-    chunks = manifest["chunks"]
-    todo = [c for c in chunks if args.force or c["status"] != "transcribed"]
-    print(f"[transcribe] {len(todo)}/{len(chunks)} chunk(s) to process "
-          f"({'--force: re-transcribing all' if args.force else 'skipping already-transcribed'})")
-
+def transcribe_all(todo: list[dict], job_dir: Path, server: str, model: str, prompt: str,
+                    temperature: float, timeout: float) -> tuple[int, int, int]:
     n_ok = n_failed = n_flagged = 0
     for entry in todo:
         wav_path = job_dir / entry["file"]
@@ -137,8 +103,7 @@ def main():
         last_error = None
         for attempt in range(2):  # design.md SS21: 1 retry on timeout/transient error, then fail
             try:
-                result = transcribe_one(args.server, args.model, prompt, wav_path,
-                                         args.temperature, args.timeout)
+                result = transcribe_one(server, model, prompt, wav_path, temperature, timeout)
                 break
             except requests.exceptions.RequestException as e:
                 last_error = e
@@ -169,6 +134,45 @@ def main():
         if repeat:
             entry["flags"] = ["possible_infinite_repetition"]
         n_ok += 1
+    return n_ok, n_failed, n_flagged
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("job", type=Path, help="job directory (temp/{job_id}) or its manifest.json")
+    ap.add_argument("--server", default=DEFAULT_SERVER, help="llama-server base URL")
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="model field sent in the request body")
+    ap.add_argument("--language", default="auto",
+                     help="'auto' (default, no hint) or a language code e.g. 'ko' (design.md SS5A.8)")
+    ap.add_argument("--temperature", type=float, default=1.0, help="design.md SS6.1 default")
+    ap.add_argument("--timeout", type=float, default=120.0, help="per-request timeout in seconds")
+    ap.add_argument("--force", action="store_true",
+                     help="re-transcribe chunks already marked 'transcribed' (default: skip them, resume-style)")
+    args = ap.parse_args()
+
+    manifest_path = resolve_manifest_path(args.job)
+    if not manifest_path.exists():
+        sys.exit(f"manifest.json not found: {manifest_path} (run Stage 2c chunk_export.py first)")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    job_dir = manifest_path.parent
+    prompt = build_prompt(args.language)
+    print(f"[transcribe] server={args.server} model={args.model} language={args.language} "
+          f"prompt={prompt!r}")
+
+    chunks = manifest["chunks"]
+    todo = [c for c in chunks if args.force or c["status"] != "transcribed"]
+    print(f"[transcribe] {len(todo)}/{len(chunks)} chunk(s) to process "
+          f"({'--force: re-transcribing all' if args.force else 'skipping already-transcribed'})")
+
+    config = load_config()
+    # design.md SS6.3: server lifecycle is scoped to "Phase B" -- started (if
+    # managed) right before this loop, torn down right after, not held for
+    # the whole run_transcript.py invocation.
+    with ensure_llama_server(args.server, config, log_path=job_dir / "llama-server.log"):
+        n_ok, n_failed, n_flagged = transcribe_all(
+            todo, job_dir, args.server, args.model, prompt, args.temperature, args.timeout,
+        )
 
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n[summary] transcribed={n_ok}  failed={n_failed}  flagged_for_review={n_flagged}  "

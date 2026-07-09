@@ -3,11 +3,17 @@
 `phase_a_roadmap.md`의 Stage 1~4를 구현한 독립 실행 CLI 스크립트 모음. 각 스크립트는 단독으로
 실행 가능하며, 뒷 단계로 갈수록 앞 단계의 산출물(`temp/{job_id}/` 아래)을 그대로 재사용한다.
 
+4단계를 한 번에 실행하고 싶으면 저장소 루트의 [`run_transcript.py`](../run_transcript.py)를 쓴다:
+`python run_transcript.py path/to/source_video.mp4` — 성공하면 `{source}.srt`를 원본 옆에 만들고
+`temp/{job_id}/`를 삭제한다.
+
 ## 0. 사전 준비
 
 - `ffmpeg`/`ffprobe`가 PATH에 있어야 함
 - Python 패키지: `soundfile`, `onnxruntime`, `numpy`, `matplotlib`, `requests`
-- Stage 3(전사)만 llama-server(Qwen3-ASR)가 떠 있어야 함 — [SETUP.MD](../SETUP.MD), [TESTING.md](../TESTING.md) 참고
+- Stage 3(전사)만 llama-server(Qwen3-ASR)가 필요함 — `config.json`의 `local_api.launch_mode`가
+  `"external"`(기본)이면 [SETUP.MD](../SETUP.MD)/[TESTING.md](../TESTING.md)대로 미리 직접 띄워둬야
+  하고, `"managed"`면 Stage 3가 시작될 때 알아서 실행하고 끝나면 종료한다 (아래 "Managed 모드" 참고)
 - Silero VAD `.onnx` 모델은 Stage 2a/2b/2c 최초 실행 시 `models/silero_vad.onnx`로 자동 다운로드됨 (gitignore 대상)
 
 모든 명령은 저장소 루트에서 실행한다 (`temp/`, `models/`가 실행 위치 기준으로 생성되므로).
@@ -131,7 +137,9 @@ python pipeline/transcribe_chunks.py temp/{job_id} --server http://localhost:808
 | `--timeout` | 120 | 요청당 타임아웃(초) |
 | `--force` | off | 이미 `transcribed` 상태인 chunk도 재전사 (기본은 건너뜀 — resume 방식) |
 
-- 실행 전 `/health`로 서버 연결을 먼저 확인하고, 안 떠 있으면 chunk마다 실패시키는 대신 즉시 종료.
+- 전사를 시작하기 전 `pipeline/server_manager.py`가 서버 상태를 확인한다 (design.md §6.3, 아래
+  "Managed 모드" 참고). 이미 응답 중이면 그대로 재사용하고, 응답이 없는데 `launch_mode`가
+  `"external"`이면 즉시 종료.
 - 결과는 `chunk_NNNN.txt`로 저장(가공된 최종 텍스트), 콘솔에는 원문 그대로 로그.
 - 실패 시 1회 재시도 후 `status: "failed"`로 표시하고 다음 chunk로 계속 진행(design.md §21).
 - 같은 2-20자 패턴이 5회 이상 연속 반복되면 `[WARNING: possible infinite repetition ...]` 표시 —
@@ -142,6 +150,41 @@ python pipeline/transcribe_chunks.py temp/{job_id} --server http://localhost:808
 - **사람이 직접 해야 하는 것**: Stage 0 정답 전사가 있는 클립이면 CER 계산(현재 스크립트에 없음,
   참고: `tools/eval_language_hint.py`), 그리고 `chunk_NNNN.txt`를 `chunk_NNNN.wav`와 나란히 놓고
   할루시네이션/무한반복/언어오판 육안 확인.
+
+### Managed 모드 — llama-server 자동 실행/종료 (design.md §6.3)
+
+`config.json`(없으면 `config.example.json`)의 `local_api` 섹션으로 제어한다:
+
+```json
+"local_api": {
+  "launch_mode": "managed",
+  "server_binary": "C:\\ai\\llama\\llama-server.exe",
+  "model_path": "",
+  "mmproj_path": "",
+  "hf_repo": "ggml-org/Qwen3-ASR-1.7B-GGUF",
+  "managed": {
+    "port": 8080,
+    "extra_args": "--ctx-size 4096 --parallel 1 --cache-type-k q8_0 --cache-type-v q8_0",
+    "startup_timeout_sec": 120
+  }
+}
+```
+
+- `launch_mode`가 `"external"`(기본)이면 이 섹션은 무시되고, 미리 떠 있는 서버가 반드시 있어야 한다.
+- `"managed"`면 `pipeline/server_manager.py`가 다음 순서로 동작한다 (`transcribe_chunks.py`가 자동으로
+  이 로직을 거치므로 `run_transcript.py`/`transcribe_chunks.py` 어느 쪽으로 실행해도 동일하게 적용됨):
+  1. 지정된 `--server` 주소가 이미 응답하는지 확인 → **응답이 있으면 그대로 재사용하고, 이 프로그램이
+     직접 켠 게 아니므로 끝나고 나서도 절대 종료시키지 않는다** (design.md §6.3 규칙 그대로).
+  2. 응답이 없으면 `server_binary`로 subprocess 실행. `model_path`가 채워져 있으면
+     `--model {model_path}` (+`--mmproj {mmproj_path}`), 비어 있으면 `-hf {hf_repo}`로 자동 다운로드
+     (TESTING.md에서 검증된 방식). `managed.extra_args`를 그대로 뒤에 붙인다.
+  3. `/health`를 `managed.startup_timeout_sec`(기본 120초)까지 폴링, 준비되면 전사 시작.
+  4. Stage 3가 끝나면(성공/실패 무관, `finally`) 이 프로그램이 직접 켠 프로세스만 종료(SIGTERM, 15초
+     내 미종료 시 강제 종료).
+- 서버의 stdout/stderr는 `temp/{job_id}/llama-server.log`에 기록된다 (콘솔에 그대로 흘리지 않음).
+- 실측 확인(2026-07-09, `rec1.m4a`): 서버 없는 상태 → managed 기동 2.0s 후 healthy → 전사 → 자동 종료
+  → `/health` 재확인 결과 완전히 내려감. 반대로 서버를 미리 직접 띄워둔 상태에서 같은 명령을 실행하면
+  "이미 응답 중" 메시지와 함께 재사용하고, 끝난 뒤에도 그 서버는 그대로 살아있음을 확인.
 
 ---
 
