@@ -61,7 +61,7 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(self._build_vad_tab(), "VAD")
         tabs.addTab(self._build_provider_tab(), "Provider")
-        tabs.addTab(self._build_language_tab(), "언어 / 용어집")
+        tabs.addTab(self._build_vocabulary_tab(), "용어집")
         tabs.addTab(self._build_prompt_tab(), "Prompt")
         tabs.addTab(self._build_params_tab(), "모델 파라미터")
 
@@ -148,6 +148,24 @@ class SettingsDialog(QDialog):
         gform.addRow(gtest_row)
         layout.addWidget(self.gemini_box)
 
+        lang_box = QGroupBox("출력 언어 설정")
+        lform = QVBoxLayout(lang_box)
+        self.rb_lang_auto = QRadioButton("Auto (모델이 자동 감지)")
+        self.rb_lang_auto.setChecked(True)
+        lform.addWidget(self.rb_lang_auto)
+        forced_row = QHBoxLayout()
+        self.rb_lang_forced = QRadioButton("강제 지정")
+        self.lang_code = QComboBox()
+        self.lang_code.setEditable(True)
+        self.lang_code.addItems(["ko", "ja", "zh", "en"])
+        forced_row.addWidget(self.rb_lang_forced)
+        forced_row.addWidget(self.lang_code)
+        forced_row.addStretch()
+        lform.addLayout(forced_row)
+        layout.addWidget(lang_box)
+        self.rb_lang_auto.toggled.connect(lambda: self.lang_code.setEnabled(self.rb_lang_forced.isChecked()))
+        self.rb_lang_forced.toggled.connect(lambda: self.lang_code.setEnabled(self.rb_lang_forced.isChecked()))
+
         note = QLabel(self.NOTE_TEXT)
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 11px;")
@@ -178,25 +196,9 @@ class SettingsDialog(QDialog):
         form.addRow(label, container)
         return edit
 
-    def _build_language_tab(self) -> QWidget:
+    def _build_vocabulary_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-
-        lang_box = QGroupBox("출력 언어 설정")
-        lform = QVBoxLayout(lang_box)
-        self.rb_lang_auto = QRadioButton("Auto (모델이 자동 감지)")
-        self.rb_lang_auto.setChecked(True)
-        lform.addWidget(self.rb_lang_auto)
-        forced_row = QHBoxLayout()
-        self.rb_lang_forced = QRadioButton("강제 지정")
-        self.lang_code = QComboBox()
-        self.lang_code.setEditable(True)
-        self.lang_code.addItems(["ko", "ja", "zh", "en"])
-        forced_row.addWidget(self.rb_lang_forced)
-        forced_row.addWidget(self.lang_code)
-        forced_row.addStretch()
-        lform.addLayout(forced_row)
-        layout.addWidget(lang_box)
 
         vocab_box = QGroupBox("Custom Vocabulary (줄바꿈으로 구분)")
         vform = QVBoxLayout(vocab_box)
@@ -208,9 +210,6 @@ class SettingsDialog(QDialog):
         self.text_correction = QCheckBox("Text Correction (STT 결과를 문맥 기반으로 재교정) -- 차기 버전")
         self.text_correction.setEnabled(False)
         layout.addWidget(self.text_correction)
-
-        self.rb_lang_auto.toggled.connect(lambda: self.lang_code.setEnabled(self.rb_lang_forced.isChecked()))
-        self.rb_lang_forced.toggled.connect(lambda: self.lang_code.setEnabled(self.rb_lang_forced.isChecked()))
         return w
 
     def _build_prompt_tab(self) -> QWidget:
