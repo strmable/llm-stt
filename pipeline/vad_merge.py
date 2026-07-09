@@ -22,6 +22,7 @@ from pathlib import Path
 
 import soundfile as sf
 
+from common import vad_defaults
 from vad_raw_test import (
     SAMPLE_RATE, WINDOW_SAMPLES, ensure_extracted_wav, plot, print_stats, raw_segments, run_vad,
 )
@@ -158,21 +159,32 @@ def add_merge_cli_args(ap: argparse.ArgumentParser) -> None:
     """Shared CLI args for anything that runs the Stage 2a+2b pipeline
     (this script, and Stage 2c's chunk_export.py) -- kept in one place so
     the two stages can't silently drift to different defaults/help text.
+
+    Defaults come from config.json's "vad" section (falling back to
+    config.example.json, then a hardcoded fallback -- see common.vad_defaults),
+    so editing config.json changes these scripts' defaults without needing
+    a CLI flag every time. An explicit CLI flag still always wins.
     """
-    ap.add_argument("--threshold", type=float, default=0.5,
-                     help="speech probability threshold for the underlying raw VAD pass (Stage 2a)")
-    ap.add_argument("--min-silence", type=float, default=0.7,
-                     help="silences <= this many seconds are merged across (design.md SS12.2: 0.5-1.0s)")
-    ap.add_argument("--min-speech", type=float, default=1.0,
-                     help="speech segments shorter than this are absorbed into a neighbor")
-    ap.add_argument("--max-absorb-gap", type=float, default=3.0,
+    d = vad_defaults()
+    ap.add_argument("--threshold", type=float, default=d["threshold"],
+                     help="speech probability threshold for the underlying raw VAD pass (Stage 2a) "
+                          f"(default from config: {d['threshold']})")
+    ap.add_argument("--min-silence", type=float, default=d["min_silence"],
+                     help="silences <= this many seconds are merged across (design.md SS12.2: 0.5-1.0s) "
+                          f"(default from config: {d['min_silence']})")
+    ap.add_argument("--min-speech", type=float, default=d["min_speech"],
+                     help="speech segments shorter than this are absorbed into a neighbor "
+                          f"(default from config: {d['min_speech']})")
+    ap.add_argument("--max-absorb-gap", type=float, default=d["max_absorb_gap"],
                      help="cap on how far a short-speech absorb (--min-speech) can reach across "
                           "silence; beyond this the fragment is left standalone instead of "
                           "dragging that silence into a chunk (design.md SS12.2's own 2-3s "
                           "'real silence' cutoff is the basis for the default). Pass a negative "
-                          "value to disable the cap and restore unlimited-reach absorption")
-    ap.add_argument("--max-chunk", type=float, default=30.0,
-                     help="hard limit -- segments longer than this are force-split (model input cap)")
+                          "value to disable the cap and restore unlimited-reach absorption "
+                          f"(default from config: {d['max_absorb_gap']})")
+    ap.add_argument("--max-chunk", type=float, default=d["max_chunk"],
+                     help="hard limit -- segments longer than this are force-split (model input cap) "
+                          f"(default from config: {d['max_chunk']})")
 
 
 def resolve_max_absorb_gap(args: argparse.Namespace) -> float | None:

@@ -25,7 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import extract_audio as stage1
-from common import job_dir
+from common import job_dir, vad_defaults
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -242,8 +242,9 @@ def plot(samples: np.ndarray, probs: np.ndarray,
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", type=Path, help="input media file (any ffmpeg-readable format)")
-    ap.add_argument("--threshold", type=float, default=0.5,
-                     help="speech probability threshold (design.md SS12.1)")
+    ap.add_argument("--threshold", type=float, default=vad_defaults()["threshold"],
+                     help="speech probability threshold (design.md SS12.1) "
+                          f"(default from config: {vad_defaults()['threshold']})")
     args = ap.parse_args()
 
     if not args.input.exists():

@@ -14,9 +14,45 @@ from pathlib import Path
 # Temp dir root is relative to the repo/install root (parent of this file's
 # pipeline/ dir), not the input file's location, per design.md SS13 (input
 # may be read-only/network; the future GUI main.py lives at the repo root).
-TEMP_ROOT = Path(__file__).resolve().parent.parent / "temp"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TEMP_ROOT = REPO_ROOT / "temp"
 
 SOURCE_INFO_FILENAME = "source_info.json"
+
+CONFIG_PATH = REPO_ROOT / "config.json"
+CONFIG_EXAMPLE_PATH = REPO_ROOT / "config.example.json"
+
+# Fallback if neither config.json nor config.example.json exists (e.g. a
+# fresh checkout before either was ever created) -- keeps the CLI scripts
+# working standalone rather than erroring on a missing file.
+_VAD_DEFAULTS_FALLBACK = {
+    "threshold": 0.5,
+    "min_silence": 0.7,
+    "min_speech": 1.0,
+    "max_absorb_gap": 3.0,
+    "max_chunk": 30.0,
+}
+
+
+def load_config() -> dict:
+    """config.json (design.md SS9) if present, else config.example.json, else {}.
+
+    config.json is gitignored (may hold a real Gemini API key/local paths once
+    someone fills in Settings) -- config.example.json is the tracked template
+    with safe defaults, so a fresh checkout without a local config.json still
+    gets the same VAD/etc. defaults instead of silently falling back further.
+    """
+    for path in (CONFIG_PATH, CONFIG_EXAMPLE_PATH):
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
+
+def vad_defaults() -> dict:
+    """VAD section of the config, with _VAD_DEFAULTS_FALLBACK filling in any
+    key missing from the file (partial/edited configs shouldn't crash CLI
+    scripts that expect all five keys to exist)."""
+    return {**_VAD_DEFAULTS_FALLBACK, **load_config().get("vad", {})}
 
 
 def compute_job_id(source: Path) -> str:
