@@ -1,5 +1,6 @@
 """Main window (design.md SS7)."""
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ PIPELINE_DIR = REPO_ROOT / "pipeline"
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from common import compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
+from common import TEMP_ROOT, compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
 
 from .settings_dialog import SettingsDialog
 from .worker import TranscriptionWorker
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.source_path: Path | None = None
         self.worker: TranscriptionWorker | None = None
+        self._drop_after_stop = False  # SS14.4 요청: Stop과 별개로 temp/{job_id} 완전 삭제
 
         self._build_ui()
         self._update_controls()
@@ -74,6 +76,9 @@ class MainWindow(QMainWindow):
         self.btn_start = QPushButton("Transcript")
         self.btn_start.clicked.connect(self._on_start_stop_clicked)
         btn_row.addWidget(self.btn_start)
+        self.btn_cancel = QPushButton("완전 취소 (임시파일 삭제)")
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        btn_row.addWidget(self.btn_cancel)
         self.btn_copy = QPushButton("Copy")
         self.btn_copy.clicked.connect(self._copy_srt)
         btn_row.addWidget(self.btn_copy)
@@ -121,6 +126,26 @@ class MainWindow(QMainWindow):
             self.btn_start.setText("Stop")
         else:
             self.btn_start.setText("Transcript")
+        self.btn_cancel.setEnabled(self.source_path is not None and (running or self._job_dir_exists()))
+
+    def _job_dir_exists(self) -> bool:
+        """True if a resumable temp/{job_id}/manifest.json exists for the
+        currently selected file -- gates the "완전 취소" button when idle."""
+        if self.source_path is None or not self.source_path.exists():
+            return False
+        job_id = compute_job_id(self.source_path)
+        return (TEMP_ROOT / job_id / "manifest.json").exists()
+
+    def _drop_job_dir(self):
+        """Delete temp/{job_id} outright (design.md SS14.4's normal cleanup is
+        success-only; this is the explicit user-requested "완전 취소" -- forfeits
+        Resume for this file, unlike a plain Stop which always preserves it)."""
+        if self.source_path is None:
+            return
+        job_id = compute_job_id(self.source_path)
+        path = TEMP_ROOT / job_id
+        if path.exists():
+            shutil.rmtree(path)
 
     def _on_start_stop_clicked(self):
         if self.worker is not None:
@@ -166,6 +191,33 @@ class MainWindow(QMainWindow):
             self.phase_label.setText("중단 요청됨 -- 현재 chunk 완료 후 정지합니다...")
             self.btn_start.setEnabled(False)
 
+    def _on_cancel_clicked(self):
+        if self.worker is not None:
+            reply = QMessageBox.question(
+                self, "완전 취소",
+                "작업을 중단하고 임시 파일을 삭제합니다. 진행 상황은 복구할 수 없으며 다음 실행은 "
+                "처음부터 다시 시작합니다. 계속하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self._drop_after_stop = True
+            self._request_stop()
+            self.btn_cancel.setEnabled(False)
+            return
+
+        reply = QMessageBox.question(
+            self, "완전 취소",
+            "이 파일의 임시 작업 데이터(temp/)를 삭제합니다. 이어하기(Resume)가 더 이상 불가능하며 "
+            "다음 실행은 처음부터 다시 시작합니다. 계속하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._drop_job_dir()
+        self.phase_label.setText("취소됨 (임시 파일 삭제됨)")
+        self._update_controls()
+
     def _cleanup_worker(self):
         if self.worker is not None:
             self.worker.wait()
@@ -195,7 +247,12 @@ class MainWindow(QMainWindow):
         self._cleanup_worker()
 
     def _on_job_stopped(self):
-        self.phase_label.setText("중단됨 (재시작 시 이어서 진행 가능)")
+        if self._drop_after_stop:
+            self._drop_after_stop = False
+            self._drop_job_dir()
+            self.phase_label.setText("취소됨 (임시 파일 삭제됨)")
+        else:
+            self.phase_label.setText("중단됨 (재시작 시 이어서 진행 가능)")
         self._cleanup_worker()
 
     # -- Misc buttons ---------------------------------------------------------

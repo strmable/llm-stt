@@ -59,11 +59,11 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         root.addWidget(tabs)
 
+        tabs.addTab(self._build_vad_tab(), "VAD")
         tabs.addTab(self._build_provider_tab(), "Provider")
         tabs.addTab(self._build_language_tab(), "언어 / 용어집")
         tabs.addTab(self._build_prompt_tab(), "Prompt")
         tabs.addTab(self._build_params_tab(), "모델 파라미터")
-        tabs.addTab(self._build_vad_tab(), "VAD")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
