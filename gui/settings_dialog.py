@@ -210,6 +210,16 @@ class SettingsDialog(QDialog):
         self.text_correction = QCheckBox("Text Correction (STT 결과를 문맥 기반으로 재교정) -- 차기 버전")
         self.text_correction.setEnabled(False)
         layout.addWidget(self.text_correction)
+
+        hallucination_box = QGroupBox("할루시네이션 필터")
+        hform = QVBoxLayout(hallucination_box)
+        self.dedup_repeated_chunks = QCheckBox(
+            "직전 chunk와 텍스트가 동일하면 제거 (오디오가 흐릿할 때 이전 문장을 그대로 반복 출력하는 "
+            "할루시네이션 억제, 기본 OFF)"
+        )
+        hform.addWidget(self.dedup_repeated_chunks)
+        layout.addWidget(hallucination_box)
+        layout.addStretch()
         return w
 
     def _build_prompt_tab(self) -> QWidget:
@@ -353,6 +363,8 @@ class SettingsDialog(QDialog):
 
         vocab = cfg.get("text_enhancement", {}).get("custom_vocabulary", [])
         self.vocabulary.setPlainText("\n".join(vocab))
+        self.dedup_repeated_chunks.setChecked(
+            cfg.get("text_enhancement", {}).get("dedup_repeated_chunks", False))
 
         self.prompt_edit.setPlainText(cfg.get("prompt", {}).get("template", ""))
 
@@ -417,6 +429,7 @@ class SettingsDialog(QDialog):
         cfg.setdefault("text_enhancement", {"custom_vocabulary": [], "text_correction": {
             "enabled": False, "provider": "local_api", "window_chunks": 5}})
         cfg["text_enhancement"]["custom_vocabulary"] = vocab_lines
+        cfg["text_enhancement"]["dedup_repeated_chunks"] = self.dedup_repeated_chunks.isChecked()
 
         cfg.setdefault("cleanup", {})
         cfg["cleanup"]["remove_temp_on_success"] = self.cleanup_checkbox.isChecked()

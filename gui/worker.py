@@ -17,6 +17,7 @@ Two things this worker does beyond what the CLI stage scripts currently do
 import base64
 import datetime
 import json
+import re
 import shutil
 import sys
 import time
@@ -41,6 +42,15 @@ from vad_raw_test import SAMPLE_RATE, ensure_extracted_wav, raw_segments, run_va
 
 MAX_CONSECUTIVE_FAILURES = 5  # design.md SS21
 FAILED_PLACEHOLDER = "[TRANSCRIPTION FAILED]"
+
+_TRAILING_PUNCT_RE = re.compile(r"[\s.,!?~…、。！？]+$")
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Loose equality for the repeated-chunk hallucination check below --
+    collapses whitespace and ignores trailing punctuation so "그렇습니다."
+    vs "그렇습니다" still count as the same echoed sentence."""
+    return _TRAILING_PUNCT_RE.sub("", " ".join(text.split())).casefold()
 
 
 def build_prompt(template: str, context: str, language: str, vocabulary: list[str]) -> str:
@@ -320,17 +330,41 @@ class TranscriptionWorker(QThread):
                 else:
                     lang, text = parse_response(result["raw"])
                 txt_path = wav_path.with_suffix(".txt")
-                txt_path.write_text(text, encoding="utf-8")
 
-                repeat = detect_repetition(text)
-                if repeat:
-                    self.logMessage.emit(f"[WARNING] chunk {entry['id']}: possible infinite repetition of {repeat!r}")
-                    entry["flags"] = ["possible_infinite_repetition"]
+                # Faint/near-silent audio sometimes makes the model just echo
+                # the previous chunk's text back verbatim instead of admitting
+                # it heard nothing -- an observed hallucination pattern, not a
+                # real repeated sentence (real repeats are rare across a VAD
+                # chunk boundary and 30s max-chunk gap). Opt-in since a chunk
+                # legitimately repeating the prior one is possible.
+                dedup_enabled = self.config.get("text_enhancement", {}).get("dedup_repeated_chunks", False)
+                is_duplicate = (
+                    dedup_enabled and text.strip() and context.strip()
+                    and _normalize_for_dedup(text) == _normalize_for_dedup(context)
+                )
+
+                if is_duplicate:
+                    self.logMessage.emit(
+                        f"[WARNING] chunk {entry['id']}: text identical to previous chunk, "
+                        f"suppressed as suspected hallucination: {text[:60]!r}"
+                    )
+                    entry.setdefault("flags", []).append("possible_duplicate_hallucination")
+                    txt_path.write_text("", encoding="utf-8")
+                    # context deliberately left pointing at the last genuinely
+                    # new text, not this echo, so a run of several faint
+                    # chunks in a row doesn't compare against its own echo
+                else:
+                    txt_path.write_text(text, encoding="utf-8")
+                    repeat = detect_repetition(text)
+                    if repeat:
+                        self.logMessage.emit(
+                            f"[WARNING] chunk {entry['id']}: possible infinite repetition of {repeat!r}")
+                        entry.setdefault("flags", []).append("possible_infinite_repetition")
+                    context = text  # SS17: only the most recent chunk's text is kept
 
                 entry["status"] = "transcribed"
                 entry["language_detected"] = lang
                 entry["transcribe_elapsed_sec"] = round(result["elapsed"], 3)
-                context = text  # SS17: only the most recent chunk's text is kept
 
                 self.logMessage.emit(f"[INFO] Chunk #{entry['id']} completed ({result['elapsed']:.2f}s)")
                 done += 1

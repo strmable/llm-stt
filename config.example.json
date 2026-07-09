@@ -36,6 +36,7 @@
 
   "text_enhancement": {
     "custom_vocabulary": [],
+    "dedup_repeated_chunks": false,
     "text_correction": {
       "enabled": false,
       "provider": "local_api",
