@@ -1,8 +1,19 @@
+# Live app config -- may end up holding a real Gemini API key or local
+# server/model paths once someone actually fills in Settings (design.md SS9).
+# config.example.json (tracked) documents the schema/safe defaults instead.
+/config.json
+
 # Local test audio samples/recordings (not part of the repo)
 *.m4a
 *.wav
 *.mp3
 samples/
+
+# Pipeline working dir (design.md SS13: temp/{job_id}/...)
+/temp/
+
+# Downloaded model weights (e.g. Silero VAD onnx, design.md SS12.1)
+/models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

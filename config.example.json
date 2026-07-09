@@ -1,0 +1,60 @@
+{
+  "provider": "local_api",
+  "language": "auto",
+
+  "local_api": {
+    "url": "http://localhost:8080/v1/chat/completions",
+    "model": "qwen3-asr",
+    "disable_thinking": true,
+    "launch_mode": "external",
+    "server_binary": "",
+    "model_path": "",
+    "mmproj_path": "",
+    "managed": {
+      "port": 8080,
+      "extra_args": "",
+      "startup_timeout_sec": 120
+    }
+  },
+
+  "gemini": {
+    "api_key": "",
+    "model": "gemini-3.1-flash-lite"
+  },
+
+  "llm": {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 64,
+    "max_tokens": 4096
+  },
+
+  "prompt": {
+    "template": "{{language_hint}}{{vocabulary}}Transcribe the following audio chunk to text.\n\nPrevious context:\n{{context}}\n\nOutput only the transcription of the current audio chunk."
+  },
+
+  "text_enhancement": {
+    "custom_vocabulary": [],
+    "text_correction": {
+      "enabled": false,
+      "provider": "local_api",
+      "window_chunks": 5
+    }
+  },
+
+  "vad": {
+    "threshold": 0.5,
+    "min_silence": 0.7,
+    "min_speech": 1.0,
+    "max_absorb_gap": 3.0,
+    "max_chunk": 30.0
+  },
+
+  "cleanup": {
+    "remove_temp_on_success": true
+  },
+
+  "logging": {
+    "level": "INFO"
+  }
+}
