@@ -63,6 +63,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_language_tab(), "언어 / 용어집")
         tabs.addTab(self._build_prompt_tab(), "Prompt")
         tabs.addTab(self._build_params_tab(), "모델 파라미터")
+        tabs.addTab(self._build_vad_tab(), "VAD")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -270,6 +271,54 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return w
 
+    def _build_vad_tab(self) -> QWidget:
+        """design.md SS12.2/12.3 -- VAD 후처리/Chunk 경계 파라미터. CLI 스테이지
+        스크립트(vad_merge.py 등)의 동일 옵션과 config.json "vad" 섹션을 공유한다."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        vad_box = QGroupBox("VAD / Chunk 분할 파라미터")
+        form = QFormLayout(vad_box)
+
+        self.vad_threshold = QDoubleSpinBox()
+        self.vad_threshold.setRange(0.0, 1.0)
+        self.vad_threshold.setSingleStep(0.05)
+        self.vad_threshold.setDecimals(2)
+        form.addRow("Threshold (VAD 확률 임계값)", self.vad_threshold)
+
+        self.vad_min_silence = QDoubleSpinBox()
+        self.vad_min_silence.setRange(0.0, 10.0)
+        self.vad_min_silence.setSingleStep(0.1)
+        form.addRow("Min Silence (초과 시에만 실제 분할, 이하는 병합)", self.vad_min_silence)
+
+        self.vad_min_speech = QDoubleSpinBox()
+        self.vad_min_speech.setRange(0.0, 10.0)
+        self.vad_min_speech.setSingleStep(0.1)
+        form.addRow("Min Speech (미만이면 이웃 구간에 흡수)", self.vad_min_speech)
+
+        self.vad_max_absorb_gap = QDoubleSpinBox()
+        self.vad_max_absorb_gap.setRange(-1.0, 60.0)
+        self.vad_max_absorb_gap.setSingleStep(0.5)
+        self.vad_max_absorb_gap.setSpecialValueText("무제한 (음수)")
+        form.addRow("Max Absorb Gap (흡수 가능 거리 상한, 음수=무제한)", self.vad_max_absorb_gap)
+
+        self.vad_max_chunk = QDoubleSpinBox()
+        self.vad_max_chunk.setRange(1.0, 120.0)
+        self.vad_max_chunk.setSingleStep(1.0)
+        form.addRow("Max Chunk (하드 리밋, 모델 오디오 입력 상한)", self.vad_max_chunk)
+
+        layout.addWidget(vad_box)
+
+        note = QLabel(
+            "값 변경은 다음 작업(새로 시작)부터 적용됩니다. 이미 Phase A가 끝난 job을 이어하기(Resume)하면 "
+            "그 job은 최초 실행 시의 파라미터를 그대로 사용합니다 (manifest.json에 고정 기록됨)."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+        layout.addStretch()
+        return w
+
     # -- Load/save config <-> widgets ------------------------------------
 
     def _load_from_config(self):
@@ -315,6 +364,13 @@ class SettingsDialog(QDialog):
         self.max_tokens.setValue(llm.get("max_tokens", 4096))
 
         self.cleanup_checkbox.setChecked(cfg.get("cleanup", {}).get("remove_temp_on_success", True))
+
+        vad = cfg.get("vad", {})
+        self.vad_threshold.setValue(vad.get("threshold", 0.5))
+        self.vad_min_silence.setValue(vad.get("min_silence", 0.7))
+        self.vad_min_speech.setValue(vad.get("min_speech", 1.0))
+        self.vad_max_absorb_gap.setValue(vad.get("max_absorb_gap", 3.0))
+        self.vad_max_chunk.setValue(vad.get("max_chunk", 30.0))
 
         self._update_provider_enabled()
         self._update_managed_enabled()
@@ -365,6 +421,15 @@ class SettingsDialog(QDialog):
 
         cfg.setdefault("cleanup", {})
         cfg["cleanup"]["remove_temp_on_success"] = self.cleanup_checkbox.isChecked()
+
+        cfg.setdefault("vad", {})
+        cfg["vad"].update({
+            "threshold": self.vad_threshold.value(),
+            "min_silence": self.vad_min_silence.value(),
+            "min_speech": self.vad_min_speech.value(),
+            "max_absorb_gap": self.vad_max_absorb_gap.value(),
+            "max_chunk": self.vad_max_chunk.value(),
+        })
         return cfg
 
     def accept(self):
