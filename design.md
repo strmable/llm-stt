@@ -44,6 +44,7 @@ Media Transcriber는 오디오 또는 동영상 파일을 입력받아 음성을
 * 클립보드 복사
 * STT Provider 선택 (Local llama-server / Google Gemini API)
 * Prompt 커스터마이징
+* 언어 힌트(§5A.8) 및 사용자 용어집 주입(Custom Vocabulary, §5B.2)
 * 이전 인식 결과를 컨텍스트로 전달 (Context Carryover)
 * 작업 중단 및 **재시작(Resume)**
 * llama-server 자동 실행/종료 (Managed 모드)
@@ -217,6 +218,142 @@ CER 정규화(§5A.4, 구두점·공백 제거) 적용 전/후 언어별 평균 
 - Qwen3-ASR 응답은 `language {Lang}<asr_text>{내용}` 형태의 고정 구조로 나온다. 텍스트 프롬프트에 아무 언어 힌트가 없으면(`"Transcribe this audio."`) 짧고 외래어 위주인 한국어 발화("마이크 테스트")를 일본어로 오판해 가타카나로 옮기는 사례가 재현됐다 (§5A.4의 CJK 언어 혼동이 실제로 나타난 경우).
 - 프롬프트에 `language: ko` 한 줄만 추가해도 응답이 `language Korean<asr_text>...`로 정상화된다. 문장 형태(영어/한국어 지시문)든 짧은 코드(`language: ko`)든 동일하게 작동 — 즉 **경량 프롬프트 주입만으로 언어 오판을 억제 가능**.
 - 이 발견에 따라 config.json에 `language` 설정(기본 `auto`)을 추가하고, `auto`가 아니면 프롬프트에 `language: {code}` 힌트를 자동 주입하는 구조로 설계 반영 (§8, §9 참고). Qwen3-ASR 외 모델(Gemma4 등)에서도 동일하게 작동하는지는 추가 실측 필요.
+
+---
+
+## 5B. 텍스트 정확도 강화 — 용어집 주입 및 후처리
+
+### 5B.1 배경 및 역할 구분
+
+§5A.6 자체 실측과 §5A.8에서 경량 프롬프트 힌트(언어 지정)만으로 오인식이 해소되는 사례가 확인되었다. 이를 일반화하면 STT 파이프라인에 두 종류의 개입 지점이 있다.
+
+```text
+Audio
+   ↓
+[Pre-biasing] 언어 힌트({{language_hint}}, §5A.8) + Custom Vocabulary({{vocabulary}}, §5B.2)
+   │            — 인식 전에 모델에게 힌트 제공
+   ↓
+STT (Qwen3-ASR 등)
+   ↓
+Transcript
+   ↓
+[Post-processing] Text Correction (§5B.3) — 인식 후 문맥 기반으로 재교정
+   ↓
+최종 결과 (SRT)
+```
+
+역할이 명확히 구분된다:
+
+| 구분 | 시점 | 방식 | 예시 |
+|---|---|---|---|
+| **Pre-biasing (힌트 주입)** | 인식 *전* | 프롬프트에 힌트 주입, STT 모델이 후보 선택 시 우선 고려 | `language: ko` (§5A.8), "다음 용어가 등장할 수 있습니다: ヴェルサーチ, Machbase, OpenTelemetry" |
+| **Post-processing (텍스트 후처리)** | 인식 *후* | 별도 LLM 호출로 이미 나온 전사 결과를 문맥 기반 재교정 | "ベルサージ" → 문맥(패션 브랜드) 보고 "ヴェルサーチ"로 정정 |
+
+**Pre-biasing 장단점**: 모델이 처음부터 맞게 인식할 가능성이 높아지고 결과가 가장 자연스럽다. 다만 용어집에 없는 고유명사는 여전히 틀릴 수 있고, 너무 많은 용어를 넣으면 효과가 떨어질 수 있다(§23 튜닝 항목).
+
+**Post-processing 장단점**: STT는 오디오 조각(Chunk) 하나만 보고 판단하지만, 후처리 LLM은 문장 전체(또는 여러 문장)를 보고 의미적으로 판단할 수 있다. 예를 들어 "克隆技术的发展"(복제 기술)과 "德国科隆大教堂"(쾰른 대성당)은 발음이 같은 "科隆/克隆"을 문맥으로 구분해야 하는데, 오디오 단독으로는 어렵고 텍스트 문맥이 있어야 가능하다 — §5A.6 자체 실측의 잔존 오류(고유명사 이표기, 음운 유사 오인식)가 정확히 이 유형이다. 반대로 후처리는 STT가 아예 잘못 들은 음성 자체는 교정하지 못한다(텍스트 교정 문제이지 재인식이 아님).
+
+**결론**: 둘은 서로 다른 오류 유형을 잡아내므로 함께 쓰는 것이 이상적이다. 앞단(Pre-biasing)에서 오류를 줄이고, 뒷단(Post-processing)에서 남은 오류를 문맥으로 수정한다.
+
+### 5B.2 Pre-biasing — Custom Vocabulary
+
+§5A.8의 언어 힌트(`{{language_hint}}`)와 별개로, 설정 창(§8)에 사용자 용어집 입력란을 추가한다.
+
+```text
+Custom Vocabulary (선택, 줄바꿈으로 구분)
+[ Machbase                                          ]
+[ OpenTelemetry                                      ]
+[ 홍길동                                              ]
+```
+
+프롬프트 템플릿(§8)에 신규 변수 추가:
+
+| 변수 | 설명 |
+|---|---|
+| `{{vocabulary}}` | 용어집이 비어있지 않으면 `The following terms may appear in the audio:\n- 항목1\n- 항목2\n\n` 블록으로 치환, 비어있으면 빈 문자열 (빈 블록이 오히려 노이즈가 될 수 있으므로 블록째 생략) |
+
+기본 프롬프트 템플릿 갱신:
+
+```text
+{{language_hint}}{{vocabulary}}Transcribe the following audio chunk to text.
+
+Previous context:
+{{context}}
+
+Output only the transcription of the current audio chunk.
+```
+
+### 5B.3 Post-processing — Text Correction
+
+**아키텍처 상 위치**: Phase B(STT) 완료 후 별도 Phase C로 추가한다. Chunk 단위가 아니라 **문서 전체(또는 인접 여러 Chunk)를 한 번에 보고 교정**하는 것이 이 기능의 핵심 가치이므로, 실시간 Chunk 처리 루프 안에 넣지 않는다.
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│ Phase C: 텍스트 후처리 (선택, 기본 OFF)                     │
+├─────────────────────────────────────────────────────────┤
+│ Phase B 완료 후 {입력파일명}.srt 전체(또는 설정된 윈도우 크기  │
+│ 단위)를 텍스트 LLM에 전달                                    │
+│   → 문맥 기반 재교정 요청                                    │
+│   → 교정된 텍스트로 SRT 갱신 (원본은 {입력파일명}.raw.srt로    │
+│     별도 보존 — 교정이 항상 개선을 보장하지 않으므로 원본      │
+│     비교/롤백 가능해야 함)                                   │
+│   → 콘솔 로그에 변경분(diff) 기록                             │
+└─────────────────────────────────────────────────────────┘
+```
+
+**모델 선택**: Qwen3-ASR은 ASR 전용 모델이라 순수 텍스트 교정에 적합하지 않다. 후처리는 별도 텍스트 LLM(예: llama-server에 Qwen3 Instruct 계열을 띄우거나, Gemini API 텍스트 호출)을 쓴다. 원칙 2(VRAM 엄격 관리)에 따라 STT 모델과 텍스트 교정 모델을 동시에 상주시키지 않는다 — Phase B 종료(Managed 모드에서 STT 서버 종료, §6.3) 후 Phase C용 모델을 별도 구동하는 순서를 지킨다.
+
+**긴 문서 처리**: 문서 전체를 한 번에 넣으면 컨텍스트 길이 제약에 걸릴 수 있으므로, 일정 크기(예: N개 Chunk)씩 슬라이딩 윈도우로 나눠 처리한다. 세부 청킹 전략은 구현 단계에서 결정.
+
+**프롬프트 설계 방향**:
+
+```text
+다음은 음성 인식 결과입니다. 문맥을 보고 발음이 비슷해 혼동되었을
+가능성이 있는 단어(고유명사, 전문용어, 동음이의어)를 자연스럽게 교정하세요.
+원문의 의미나 문장 구조를 임의로 바꾸지 말고, 명백한 오인식만 수정하세요.
+
+{{vocabulary}}  ← Pre-biasing과 동일한 용어집을 재사용해 후처리 정확도도 높임
+
+[전사 결과]
+{{transcript_window}}
+```
+
+### 5B.4 설정 창 옵션 (§8 확장)
+
+```text
+Custom Vocabulary (선택)
+[                                                    ]
+
+[ ] Text Correction (STT 결과를 문맥 기반으로 재교정, 기본 OFF)
+    사용 시 추가 설정:
+    Provider    : (o) 로컬(Qwen3 Instruct 등)  ( ) Gemini API
+    윈도우 크기 : Chunk 단위 [   ] 개
+```
+
+세 기능은 책임이 분리되어 독립적으로 켜고 끌 수 있다: **출력 언어 설정(§8, §5A.8)**은 언어를 미리 알려주는 힌트, **Custom Vocabulary**는 등장 가능한 고유명사/전문용어를 미리 알려주는 힌트(이상 Pre-biasing), **Text Correction**은 STT 결과를 문맥에 맞게 다듬는 사후 단계(Post-processing).
+
+기본값은 Custom Vocabulary=비어있음, Text Correction=OFF로 기본 파이프라인(§11)에 영향을 주지 않는다. Text Correction은 추가 리소스(별도 모델 구동, 처리 시간 증가)를 요구하므로 명시적 옵트인.
+
+### 5B.5 config.json 반영
+
+기존 최상위 `language` 필드(§9, §5A.8)는 그대로 두고, 아래 블록을 추가한다.
+
+```json
+"text_enhancement": {
+  "custom_vocabulary": [],
+  "text_correction": {
+    "enabled": false,
+    "provider": "local_api",
+    "window_chunks": 5
+  }
+}
+```
+
+### 5B.6 버전 범위
+
+- **Pre-biasing(언어 힌트 + Custom Vocabulary)**: 언어 힌트는 §5A.8 실측으로 효과 확인, 용어집은 구현 부담이 낮으므로(프롬프트 텍스트 조합) **이번 버전에 포함**한다.
+- **Post-processing(Text Correction)**: 아키텍처 변경(Phase C, 별도 텍스트 모델)이 필요해 구현 부담이 크다. **Pre-biasing만으로 충분한지 먼저 확인한 뒤 도입 여부를 판단** — §23 향후 확장 등재.
+- 검증 아이디어: §5A.6 자체 실측의 잔존 오류(ja_001 ヴェルサーチ, zh_001 科隆)가 Custom Vocabulary로 잡히는지 확인하면 §5B.2의 실효성을 바로 검증할 수 있다.
 
 ---
 
@@ -416,6 +553,18 @@ API 키는 config.json에 평문으로 저장한다. 다중 키 로테이션은 
 * `Auto`가 아닌 값을 선택하면 프롬프트의 `{{language_hint}}`가 `language: {code}\n\n` 형태로 채워진다. `Auto`면 `{{language_hint}}`는 빈 문자열.
 * 실측 근거(§5A.8): 짧은 발화·외래어가 섞인 한국어를 모델이 일본어로 오판하는 사례가 확인됐고, `language: ko` 한 줄 힌트만으로 정상화됨을 Qwen3-ASR-1.7B로 검증 (2026-07-08). Gemma4 등 다른 모델에서의 동작은 추가 검증 필요.
 
+### Custom Vocabulary / Text Correction (§5B)
+
+```text
+Custom Vocabulary (선택, 줄바꿈으로 구분 — 등장 가능한 고유명사/전문용어)
+[                                                    ]
+
+[ ] Text Correction (STT 결과를 문맥 기반으로 재교정, 기본 OFF — 차기 버전)
+```
+
+* Custom Vocabulary가 비어있지 않으면 프롬프트의 `{{vocabulary}}`가 용어 목록 블록으로 치환된다. 비어있으면 빈 문자열 (§5B.2).
+* Text Correction은 차기 버전 검토 항목(§5B.6)이므로 이번 버전 UI에는 비활성 상태로만 표시하거나 노출하지 않는다.
+
 ### Prompt 설정
 
 멀티라인 텍스트 박스 + `[Load] [Save] [Save As]` 버튼.
@@ -426,11 +575,12 @@ API 키는 config.json에 평문으로 저장한다. 다중 키 로테이션은 
 |---|---|
 | `{{context}}` | 직전에 처리된 1개 Chunk의 인식 결과 텍스트 (없으면 빈 문자열) |
 | `{{language_hint}}` | 출력 언어 설정이 `Auto`가 아닐 때 `language: {code}\n\n`, `Auto`일 때는 빈 문자열 |
+| `{{vocabulary}}` | Custom Vocabulary(§5B.2)가 비어있지 않으면 용어 목록 블록, 비어있으면 빈 문자열 |
 
 기본 프롬프트:
 
 ```text
-{{language_hint}}Transcribe the following audio chunk to text.
+{{language_hint}}{{vocabulary}}Transcribe the following audio chunk to text.
 Use the previous context only to keep terminology, names and
 sentence flow consistent. Do not repeat the previous context
 in your output.
@@ -504,7 +654,16 @@ config.json
   },
 
   "prompt": {
-    "template": "{{language_hint}}Transcribe the following audio chunk to text.\n\nPrevious context:\n{{context}}\n\nOutput only the transcription of the current audio chunk."
+    "template": "{{language_hint}}{{vocabulary}}Transcribe the following audio chunk to text.\n\nPrevious context:\n{{context}}\n\nOutput only the transcription of the current audio chunk."
+  },
+
+  "text_enhancement": {
+    "custom_vocabulary": [],
+    "text_correction": {
+      "enabled": false,
+      "provider": "local_api",
+      "window_chunks": 5
+    }
   },
 
   "cleanup": {
@@ -1033,6 +1192,11 @@ GPU 기반 소스분리 모델(Demucs 등)을 검토했으나 다음 이유로 *
 * Windows Program Files 설치 환경에서 temp 경로 쓰기 실패 시 %LOCALAPPDATA% 폴백
 * 강제 분할(§12.2) 시 에너지 낮은 지점 우선 절단
 * Qwen3.5-Omni 라이선스/GGUF 공개 여부 주기적 재확인 (§5A.6)
+* Text Correction(후처리 LLM) 도입 (§5B.3, §5B.6)
+  - 전제조건: Pre-biasing(언어 힌트+Custom Vocabulary)만으로 충분한지 먼저 확인
+  - 도입 시: Phase C 아키텍처 추가, 텍스트 모델과 STT 모델의 VRAM 비동시 점유 보장,
+    긴 문서 슬라이딩 윈도우 청킹 전략 확정
+* Custom Vocabulary 최적 분량/포맷 튜닝 (§5B.2) — 과다 용어 주입 시 효과 저하 가능성 실측 필요
 ```
 
 ---
@@ -1088,6 +1252,8 @@ GPU 기반 소스분리 모델(Demucs 등)을 검토했으나 다음 이유로 *
 | 18 | server_binary 등 경로 필드를 config 최상위로 이동 (§9) | 모드 전환 시 재입력 방지 |
 | 19 | Qwen3-Omni-30B-A3B 후보 추가, Qwen3.5-Omni는 제외 (§5A.6) | 전작은 ggml-org GGUF로 즉시 실행 확인, 후속작은 오픈웨이트 미확인 |
 | 20 | Gemini API 다중 키 로테이션은 차기 보류 (§23) | gemini-3.1-flash-lite 가용성 검증 선행 필요 |
+| 21 | 언어 강제 지정({{language_hint}}) 및 CER 정규화·자체 실측 반영 (§5A.4, §5A.6, §5A.8, §8, §9) + Qwen3-ASR VRAM 튜닝 커맨드 (§6.1) | Claude Code 실측 세션(2026-07-08~09): 한국어→일본어 오판이 `language: ko` 한 줄로 정상화, FLEURS 9샘플 정규화 CER ja 1.6%/zh 1.9%/ko 9.9% 확정, `-hf` 기본 실행 시 VRAM 10GB+ 소모 문제를 --ctx-size 4096 등으로 약 4GB로 절감 |
+| 22 | 텍스트 정확도 강화(§5B) 신설 — Custom Vocabulary({{vocabulary}})는 이번 버전 포함, Text Correction(Phase C)은 차기 검토 | 언어 힌트 실측 효과를 일반화: 용어집 주입(인식 전 Pre-biasing)과 LLM 후처리(인식 후 문맥 재교정)를 역할 분리. 후처리는 별도 텍스트 모델 및 Phase C 아키텍처가 필요해 구현 부담이 커 Pre-biasing 우선 채택. §5A.6 잔존 오류(고유명사 이표기)가 용어집으로 잡히는지가 1차 검증 포인트 |
 
 ---
 
