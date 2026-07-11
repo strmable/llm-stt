@@ -1134,6 +1134,12 @@ PyTorch/TensorFlow는 의존성에 포함하지 않는다 (원칙 4).
   `manifest.json`에 `"possible_duplicate_hallucination"` 플래그만 남긴다 (Context는 갱신하지 않고
   직전 성공 텍스트 유지 — 흐릿한 구간이 연달아 나와도 매번 그 앞의 "진짜" 텍스트와 비교됨). 기본
   OFF인 이유: 화자가 실제로 같은 문장을 두 번 말하는 경우까지 지워버릴 수 있어 사용자 판단에 맡김.
+* **무한 반복 할루시네이션 필터 (opt-in, `text_enhancement.strip_infinite_repetition`, 기본 OFF)**: 2~20자
+  패턴이 5회 이상 연속 반복되는 `detect_repetition()` 휴리스틱(§SS 참고, `possible_infinite_repetition`
+  플래그)이 이미 있으나 기존에는 경고 로그/플래그만 남기고 텍스트는 그대로 SRT에 포함됐다. 활성화 시
+  해당 Chunk 전체를 SRT에서 제외한다(직전 duplicate 필터와 동일하게 `manifest.json`에 플래그만 남기고
+  Context는 갱신하지 않음). 기본 OFF인 이유: 반복 휴리스틱도 완벽하지 않아(예: "네네네네네" 같은
+  의도적 반복 발화) 오탐 가능성이 있어 사용자 판단에 맡김.
 
 ---
 

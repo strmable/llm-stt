@@ -354,13 +354,25 @@ class TranscriptionWorker(QThread):
                     # new text, not this echo, so a run of several faint
                     # chunks in a row doesn't compare against its own echo
                 else:
-                    txt_path.write_text(text, encoding="utf-8")
                     repeat = detect_repetition(text)
+                    strip_enabled = self.config.get("text_enhancement", {}).get(
+                        "strip_infinite_repetition", False)
                     if repeat:
-                        self.logMessage.emit(
-                            f"[WARNING] chunk {entry['id']}: possible infinite repetition of {repeat!r}")
                         entry.setdefault("flags", []).append("possible_infinite_repetition")
-                    context = text  # SS17: only the most recent chunk's text is kept
+                    if repeat and strip_enabled:
+                        self.logMessage.emit(
+                            f"[WARNING] chunk {entry['id']}: possible infinite repetition of {repeat!r}, "
+                            f"suppressed as suspected hallucination: {text[:60]!r}"
+                        )
+                        txt_path.write_text("", encoding="utf-8")
+                        # context deliberately left pointing at the last genuine
+                        # text, same rationale as the duplicate-chunk branch above
+                    else:
+                        if repeat:
+                            self.logMessage.emit(
+                                f"[WARNING] chunk {entry['id']}: possible infinite repetition of {repeat!r}")
+                        txt_path.write_text(text, encoding="utf-8")
+                        context = text  # SS17: only the most recent chunk's text is kept
 
                 entry["status"] = "transcribed"
                 entry["language_detected"] = lang

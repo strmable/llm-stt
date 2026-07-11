@@ -218,6 +218,10 @@ class SettingsDialog(QDialog):
             "할루시네이션 억제, 기본 OFF)"
         )
         hform.addWidget(self.dedup_repeated_chunks)
+        self.strip_infinite_repetition = QCheckBox(
+            "동일 패턴이 5회 이상 연속 반복되면 해당 chunk 제거 (무한 반복 할루시네이션 억제, 기본 OFF)"
+        )
+        hform.addWidget(self.strip_infinite_repetition)
         layout.addWidget(hallucination_box)
         layout.addStretch()
         return w
@@ -365,6 +369,8 @@ class SettingsDialog(QDialog):
         self.vocabulary.setPlainText("\n".join(vocab))
         self.dedup_repeated_chunks.setChecked(
             cfg.get("text_enhancement", {}).get("dedup_repeated_chunks", False))
+        self.strip_infinite_repetition.setChecked(
+            cfg.get("text_enhancement", {}).get("strip_infinite_repetition", False))
 
         self.prompt_edit.setPlainText(cfg.get("prompt", {}).get("template", ""))
 
@@ -430,6 +436,7 @@ class SettingsDialog(QDialog):
             "enabled": False, "provider": "local_api", "window_chunks": 5}})
         cfg["text_enhancement"]["custom_vocabulary"] = vocab_lines
         cfg["text_enhancement"]["dedup_repeated_chunks"] = self.dedup_repeated_chunks.isChecked()
+        cfg["text_enhancement"]["strip_infinite_repetition"] = self.strip_infinite_repetition.isChecked()
 
         cfg.setdefault("cleanup", {})
         cfg["cleanup"]["remove_temp_on_success"] = self.cleanup_checkbox.isChecked()
