@@ -53,6 +53,13 @@ def _normalize_for_dedup(text: str) -> str:
     return _TRAILING_PUNCT_RE.sub("", " ".join(text.split())).casefold()
 
 
+def _format_eta(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def build_prompt(template: str, context: str, language: str, vocabulary: list[str]) -> str:
     """design.md SS8 Template Variables."""
     language_hint = f"language: {language}\n\n" if language and language != "auto" else ""
@@ -255,6 +262,16 @@ class TranscriptionWorker(QThread):
         done = total - len(todo)
         self.progressChanged.emit(done, total)
 
+        # Seed the running average from chunks already transcribed (resume-safe),
+        # so the ETA is accurate from the first chunk of this run, not just this session's.
+        elapsed_total = sum(
+            c["transcribe_elapsed_sec"] for c in chunks
+            if c["status"] == "transcribed" and "transcribe_elapsed_sec" in c
+        )
+        elapsed_count = sum(
+            1 for c in chunks if c["status"] == "transcribed" and "transcribe_elapsed_sec" in c
+        )
+
         context = ""
         # Resume: recover context from the last successfully-transcribed chunk.
         for c in reversed(chunks):
@@ -279,12 +296,17 @@ class TranscriptionWorker(QThread):
         n_consecutive_failures = 0
 
         def process_todo():
-            nonlocal context, n_consecutive_failures, done
+            nonlocal context, n_consecutive_failures, done, elapsed_total, elapsed_count
             for entry in todo:
                 if self._stop_requested:
                     self.logMessage.emit("[INFO] Cancel requested, waiting current chunk")
                     return
-                self.phaseChanged.emit(f"Phase B: Transcribing chunk {entry['id']}/{total}")
+                status_msg = f"Transcribing chunk {entry['id']}/{total}"
+                if elapsed_count > 0:
+                    avg = elapsed_total / elapsed_count
+                    eta_sec = avg * (total - done)
+                    status_msg += f" - {_format_eta(eta_sec)} remaining..."
+                self.phaseChanged.emit(status_msg)
                 wav_path = job_dir_path / entry["file"]
                 prompt = build_prompt(prompt_template, context, language, vocabulary)
 
@@ -377,6 +399,8 @@ class TranscriptionWorker(QThread):
                 entry["status"] = "transcribed"
                 entry["language_detected"] = lang
                 entry["transcribe_elapsed_sec"] = round(result["elapsed"], 3)
+                elapsed_total += result["elapsed"]
+                elapsed_count += 1
 
                 self.logMessage.emit(f"[INFO] Chunk #{entry['id']} completed ({result['elapsed']:.2f}s)")
                 done += 1
