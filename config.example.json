@@ -40,8 +40,43 @@
     "strip_infinite_repetition": false,
     "text_correction": {
       "enabled": false,
-      "provider": "local_api",
-      "window_chunks": 5
+
+      "server": {
+        "url": "http://localhost:8081/v1/chat/completions",
+        "launch_mode": "external",
+        "server_binary": "",
+        "model_path": "",
+        "port": 8081,
+        "extra_args": "--ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-budget 0 --jinja",
+        "startup_timeout_sec": 120
+      },
+
+      "sampling": {
+        "temperature": 0.25,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.0,
+        "repetition_penalty": 1.0,
+        "max_tokens": 512
+      },
+
+      "full_context": {
+        "max_segment_chars": 60000,
+        "segment_split_count": 3,
+        "glossary_assist": false
+      },
+
+      "speaker_detection": {
+        "enabled": true,
+        "trigger_length_chars": 100
+      },
+
+      "cue_splitter": {
+        "cps_threshold": 15,
+        "max_cue_duration_sec": null,
+        "min_cue_duration_sec": null,
+        "show_speaker_label": false
+      }
     }
   },
 

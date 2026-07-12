@@ -1,5 +1,6 @@
 """Main window (design.md SS7)."""
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -16,7 +17,7 @@ PIPELINE_DIR = REPO_ROOT / "pipeline"
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from common import TEMP_ROOT, compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
+from common import CONFIG_PATH, TEMP_ROOT, compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
 
 from .settings_dialog import SettingsDialog
 from .worker import TranscriptionWorker
@@ -72,6 +73,19 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         root.addWidget(self.progress_bar)
+
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel("출력 언어 :"))
+        self.language_combo = QComboBox()
+        self.language_combo.setEditable(True)
+        self.language_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.language_combo.addItems(["auto", "ko", "ja", "zh", "en"])
+        self.language_combo.setCurrentText(self.config.get("language", "auto"))
+        self.language_combo.activated.connect(self._on_language_changed)
+        self.language_combo.lineEdit().editingFinished.connect(self._on_language_changed)
+        lang_row.addWidget(self.language_combo)
+        lang_row.addStretch()
+        root.addLayout(lang_row)
 
         btn_row = QHBoxLayout()
         self.btn_start = QPushButton("Transcript")
@@ -260,6 +274,14 @@ class MainWindow(QMainWindow):
 
     def _copy_srt(self):
         QApplication.clipboard().setText(self.srt_view.toPlainText())
+
+    def _on_language_changed(self, *_args):
+        language = self.language_combo.currentText().strip() or "auto"
+        if self.config.get("language", "auto") == language:
+            return
+        self.config = load_config()
+        self.config["language"] = language
+        CONFIG_PATH.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _open_settings(self):
         dialog = SettingsDialog(self.config, self)
