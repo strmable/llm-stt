@@ -62,6 +62,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_vad_tab(), "VAD")
         tabs.addTab(self._build_provider_tab(), "Provider")
         tabs.addTab(self._build_vocabulary_tab(), "용어집")
+        tabs.addTab(self._build_postprocessing_tab(), "후처리")
         tabs.addTab(self._build_prompt_tab(), "Prompt")
         tabs.addTab(self._build_params_tab(), "모델 파라미터")
 
@@ -206,6 +207,12 @@ class SettingsDialog(QDialog):
         self.vocabulary.setPlaceholderText("등장 가능한 고유명사/전문용어를 한 줄에 하나씩 입력")
         vform.addWidget(self.vocabulary)
         layout.addWidget(vocab_box)
+        layout.addStretch()
+        return w
+
+    def _build_postprocessing_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
 
         self.text_correction = QCheckBox("Text Correction (STT 결과를 문맥 기반으로 재교정) -- 차기 버전")
         self.text_correction.setEnabled(False)
