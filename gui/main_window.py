@@ -20,6 +20,7 @@ if str(PIPELINE_DIR) not in sys.path:
 from common import CONFIG_PATH, TEMP_ROOT, compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
 
 from .settings_dialog import SettingsDialog
+from .srt_postprocess_dialog import SrtPostprocessDialog
 from .worker import TranscriptionWorker
 
 SUPPORTED_EXTENSIONS = {
@@ -100,6 +101,9 @@ class MainWindow(QMainWindow):
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.clicked.connect(self._open_settings)
         btn_row.addWidget(self.btn_settings)
+        self.btn_postprocess = QPushButton("후처리")
+        self.btn_postprocess.clicked.connect(self._open_postprocess)
+        btn_row.addWidget(self.btn_postprocess)
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -287,6 +291,11 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.config, self)
         if dialog.exec():
             self.config = dialog.config
+
+    def _open_postprocess(self):
+        dialog = SrtPostprocessDialog(self.config, self)
+        dialog.exec()
+        self.config = load_config()  # pick up srt_postprocess options saved by the dialog
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

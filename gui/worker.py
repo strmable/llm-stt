@@ -1,10 +1,15 @@
-"""Worker thread driving Phase A/B (design.md SS11/SS19) for the GUI.
+"""Worker thread driving Phase A/B/C (design.md SS11/SS19, postprocessing.md)
+for the GUI.
 
 Reuses the same functions the independently-runnable pipeline/*.py stage
 scripts use (see phase_a_roadmap.md) instead of shelling out to them, so
 progress/cancellation/SRT updates can be reported chunk-by-chunk via Qt
 signals (design.md SS19: Worker Thread does the work, GUI Thread only
 touches widgets in response to signals).
+
+Phase C (postprocessing.md) is opt-in via config.json
+text_enhancement.text_correction.enabled (default OFF) and runs after Phase B
+fully completes -- never concurrently with the STT server (design.md SS5B.3).
 
 Two things this worker does beyond what the CLI stage scripts currently do
 (they intentionally defer these -- see transcribe_chunks.py's docstring):
@@ -35,7 +40,9 @@ if str(PIPELINE_DIR) not in sys.path:
 from build_srt import srt_timestamp  # noqa: E402
 from chunk_export import export_chunks, preserve_prior_transcriptions, validate_manifest  # noqa: E402
 from common import job_dir as get_job_dir, read_source_info, write_source_info  # noqa: E402
-from server_manager import ensure_llama_server  # noqa: E402
+from cue_splitter import DEFAULT_GAP_SEC, split_by_speaker_cues  # noqa: E402
+from server_manager import adapt_text_correction_server_config, ensure_llama_server  # noqa: E402
+from text_correction import correct_all  # noqa: E402
 from transcribe_chunks import detect_repetition, parse_response  # noqa: E402
 from vad_merge import merge_pipeline  # noqa: E402
 from vad_raw_test import SAMPLE_RATE, ensure_extracted_wav, raw_segments, run_vad  # noqa: E402
@@ -186,6 +193,31 @@ class TranscriptionWorker(QThread):
             self.jobFailed.emit(str(e))
 
     # -- Phase A -----------------------------------------------------------
+
+    def _load_existing_manifest(self, manifest_path: Path) -> dict:
+        """Resume path when temp/{job_id}/manifest.json already exists: reuse
+        it as-is instead of re-running audio extraction/VAD/chunk export.
+        job_id already encodes (source path, mtime, size) (design.md SS14.1),
+        so a manifest found under it is guaranteed to belong to this exact
+        source file, and chunk WAVs/txt files persist on disk between runs
+        (design principle 1) unless the job finished successfully or the user
+        hit "완전 취소" -- neither of which leaves a resumable manifest
+        behind. This also sidesteps a correctness trap the old
+        always-re-run-Phase-A path had: re-running VAD with the *current*
+        config instead of the manifest's pinned vad_params would silently
+        produce different chunk boundaries if VAD settings changed between
+        runs, which preserve_prior_transcriptions() matches by exact
+        (start_sec, end_sec) -- a mismatch there would discard already-done
+        transcription progress instead of just wasting time re-computing VAD."""
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        n_total = len(manifest["chunks"])
+        n_done = sum(1 for c in manifest["chunks"] if c["status"] == "transcribed")
+        self.phaseChanged.emit("Phase A: 이전 작업 재사용 (VAD 생략)")
+        self.logMessage.emit(
+            f"[INFO] Resume: reusing existing Phase A result ({n_total} chunks, "
+            f"{n_done} already transcribed) -- VAD/오디오 추출 생략"
+        )
+        return manifest
 
     def _phase_a(self, job_dir_path: Path) -> dict:
         self.phaseChanged.emit("Phase A: 오디오 추출 중...")
@@ -420,20 +452,129 @@ class TranscriptionWorker(QThread):
 
         flush()
 
+    # -- Phase C (postprocessing.md) ----------------------------------------
+
+    def _render_final_srt(self, manifest: dict, job_dir_path: Path, cue_cfg: dict) -> str:
+        """Like render_srt_with_placeholders, but each transcribed chunk's
+        corrected text (chunk_NNNN.fixed.txt, falling back to the raw
+        chunk_NNNN.txt for any chunk text_correction skipped) is run through
+        the deterministic speaker-marker cue splitter (postprocessing.md
+        SS11.1 1차 분할 only -- no CPS-based length splitting here) instead of
+        becoming exactly one cue -- so a merged Q&A becomes multiple,
+        appropriately-timed cues. CPS-based length splitting is a separate,
+        manual step run later against a translated SRT (pipeline/
+        srt_postprocess.py, gui/srt_postprocess_dialog.py)."""
+        blocks = []
+        i = 0
+        for chunk in manifest["chunks"]:
+            if chunk["status"] == "failed":
+                cues = [{"start_sec": chunk["start_sec"], "end_sec": chunk["end_sec"], "text": FAILED_PLACEHOLDER}]
+            elif chunk["status"] == "transcribed":
+                fixed_path = (job_dir_path / chunk["file"]).with_suffix(".fixed.txt")
+                raw_path = (job_dir_path / chunk["file"]).with_suffix(".txt")
+                if fixed_path.exists():
+                    text = fixed_path.read_text(encoding="utf-8").strip()
+                elif raw_path.exists():
+                    text = " ".join(raw_path.read_text(encoding="utf-8").split())
+                else:
+                    text = ""
+                if not text:
+                    continue
+                cues = split_by_speaker_cues(
+                    text, chunk["start_sec"], chunk["end_sec"],
+                    gap_sec=cue_cfg.get("gap_sec", DEFAULT_GAP_SEC),
+                    show_speaker_label=cue_cfg.get("show_speaker_label", False),
+                )
+            else:
+                continue  # pending/vad_extracted -- not reached yet
+
+            for cue in cues:
+                if not cue["text"].strip():
+                    continue
+                i += 1
+                blocks.append(
+                    f"{i}\n{srt_timestamp(cue['start_sec'])} --> {srt_timestamp(cue['end_sec'])}\n{cue['text']}\n"
+                )
+        return "\n".join(blocks)
+
+    def _phase_c(self, job_dir_path: Path, manifest: dict) -> None:
+        """Phase B ends with exactly one cue per VAD chunk (design.md SS21
+        placeholder rules only, no text correction). If Text Correction is
+        enabled (postprocessing.md, opt-in/default OFF), Phase C: (1) runs
+        full-context LLM correction per chunk on a *separate* text-instruct
+        server (never concurrently with the STT server, design.md SS5B.3),
+        which may also insert [[SPEAKER]] markers where a merged chunk holds
+        more than one speaker; (2) preserves Phase B's single-cue-per-chunk
+        SRT as {name}.raw.srt for comparison/rollback; (3) deterministically
+        re-splits every chunk into cues on speaker markers only (approximate
+        timing, SS11.1 1차 분할) and overwrites the final SRT with that.
+        CPS-based length splitting (SS11.1 2차 분할) is intentionally NOT run
+        here -- it happens manually, later, against a translated SRT (see
+        pipeline/srt_postprocess.py), so external translation still sees
+        whole sentences instead of pre-cut fragments."""
+        tc_cfg = self.config.get("text_enhancement", {}).get("text_correction", {})
+        if not tc_cfg.get("enabled", False):
+            return
+
+        output_srt = Path(manifest["output_srt"])
+        if output_srt.exists():
+            raw_srt_path = output_srt.parent / f"{output_srt.stem}.raw.srt"
+            raw_srt_path.write_text(output_srt.read_text(encoding="utf-8"), encoding="utf-8")
+            self.logMessage.emit(f"[INFO] Phase B SRT preserved as {raw_srt_path} before correction")
+
+        server_cfg = tc_cfg.get("server", {})
+        server_url = server_cfg.get("url", "http://localhost:8081/v1/chat/completions")
+        server_base = server_url.split("/v1/")[0]
+        server_manager_cfg = adapt_text_correction_server_config(server_cfg)
+
+        if server_cfg.get("launch_mode", "external") == "managed":
+            self.phaseChanged.emit("Phase C: 후처리 서버 준비 중...")
+
+        def on_progress(done: int, total: int):
+            self.progressChanged.emit(done, total)
+            self.phaseChanged.emit(f"Phase C: 텍스트 교정 중... ({done}/{total})")
+
+        with ensure_llama_server(server_base, server_manager_cfg, log_path=job_dir_path / "llama-server-tc.log"):
+            correct_all(
+                manifest, job_dir_path, tc_cfg, server_url,
+                log=self.logMessage.emit,
+                should_stop=lambda: self._stop_requested,
+                on_progress=on_progress,
+            )
+
+        if self._stop_requested:
+            self.logMessage.emit("[INFO] Cancel requested during Phase C, keeping raw.srt result")
+            return
+
+        self.phaseChanged.emit("Phase C: 화자 분할 중...")
+        srt_text = self._render_final_srt(manifest, job_dir_path, tc_cfg.get("cue_splitter", {}))
+        output_srt.write_text(srt_text, encoding="utf-8")
+        self.srtUpdated.emit(srt_text)
+        self.logMessage.emit(f"[INFO] Phase C complete, final SRT: {output_srt}")
+
     # -- Orchestration -------------------------------------------------------
 
     def _run(self):
         job_dir_path = get_job_dir(self.source)
-        if not self.resume and (job_dir_path / "manifest.json").exists():
+        manifest_path = job_dir_path / "manifest.json"
+        if not self.resume and manifest_path.exists():
             shutil.rmtree(job_dir_path)
             job_dir_path.mkdir(parents=True)
 
-        manifest = self._phase_a(job_dir_path)
+        if self.resume and manifest_path.exists():
+            manifest = self._load_existing_manifest(manifest_path)
+        else:
+            manifest = self._phase_a(job_dir_path)
         if self._stop_requested:
             self.jobStopped.emit()
             return
 
         self._phase_b(job_dir_path, manifest)
+        if self._stop_requested:
+            self.jobStopped.emit()
+            return
+
+        self._phase_c(job_dir_path, manifest)
         if self._stop_requested:
             self.jobStopped.emit()
             return

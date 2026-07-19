@@ -72,12 +72,18 @@
       },
 
       "cue_splitter": {
-        "cps_threshold": 15,
-        "max_cue_duration_sec": null,
-        "min_cue_duration_sec": null,
+        "gap_sec": 0.08,
         "show_speaker_label": false
       }
     }
+  },
+
+  "srt_postprocess": {
+    "cps_threshold": 15,
+    "max_cue_duration_sec": 7.0,
+    "min_cue_duration_sec": null,
+    "max_chars_per_cue": 40,
+    "gap_sec": 0.08
   },
 
   "vad": {

@@ -67,6 +67,28 @@ def wait_for_health(server_url: str, timeout_sec: float, poll_interval: float = 
     raise TimeoutError(f"llama-server did not become healthy at {server_url} within {timeout_sec:.0f}s")
 
 
+def adapt_text_correction_server_config(tc_server: dict) -> dict:
+    """`ensure_llama_server` expects config.json's top-level `local_api` shape
+    (managed.port/extra_args/startup_timeout_sec nested). Phase C's server
+    config (config.json text_enhancement.text_correction.server,
+    postprocessing.md SS12.2) stores those flat instead -- adapt rather than
+    duplicate the launch/health-check logic for a second server shape."""
+    return {
+        "local_api": {
+            "launch_mode": tc_server.get("launch_mode", "external"),
+            "server_binary": tc_server.get("server_binary", ""),
+            "model_path": tc_server.get("model_path", ""),
+            "mmproj_path": "",
+            "hf_repo": "",
+            "managed": {
+                "port": tc_server.get("port", 8081),
+                "extra_args": tc_server.get("extra_args", ""),
+                "startup_timeout_sec": tc_server.get("startup_timeout_sec", 120),
+            },
+        },
+    }
+
+
 @contextmanager
 def ensure_llama_server(server_url: str, config: dict, log_path: Path | None = None):
     """Yields once `server_url` is confirmed reachable. Terminates the

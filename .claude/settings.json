@@ -14,7 +14,13 @@
       "Bash(python -c \"import matplotlib; print\\(matplotlib.__version__\\)\")",
       "Bash(python -c \"import numpy; print\\(numpy.__version__\\)\")",
       "Bash(python -m pip install onnxruntime)",
-      "Bash(powershell -Command \"Get-Process llama-server -ErrorAction SilentlyContinue | Stop-Process -Force\")"
+      "Bash(powershell -Command \"Get-Process llama-server -ErrorAction SilentlyContinue | Stop-Process -Force\")",
+      "Read(//c/Users/khshim/.claude/projects/c--Users-khshim-Proj-llm-stt/memory//**)",
+      "Read(//c/Users/khshim/.claude/projects/c--Users-khshim-Proj-llm-stt/memory/**)",
+      "Bash(ls -la /c/Users/khshim/.claude/projects/c--Users-khshim-Proj-llm-stt/memory/ 2>&1 *)",
+      "Bash(python -c \"import PySide6; print\\(PySide6.__version__\\)\")",
+      "Bash(pip list *)",
+      "Bash(where python *)"
     ]
   }
 }

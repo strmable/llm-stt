@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -30,6 +31,45 @@ def srt_timestamp(seconds: float) -> str:
     m, rem = divmod(rem, 60_000)
     s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+_TIMESTAMP_RE = re.compile(r"(\d+):(\d{2}):(\d{2}),(\d{3})")
+_TIMING_LINE_RE = re.compile(
+    rf"{_TIMESTAMP_RE.pattern}\s*-->\s*{_TIMESTAMP_RE.pattern}")
+
+
+def parse_srt_timestamp(s: str) -> float:
+    """Inverse of srt_timestamp(): "HH:MM:SS,mmm" -> seconds."""
+    m = _TIMESTAMP_RE.fullmatch(s.strip())
+    if not m:
+        raise ValueError(f"not an SRT timestamp: {s!r}")
+    h, mi, sec, ms = (int(g) for g in m.groups())
+    return h * 3600 + mi * 60 + sec + ms / 1000
+
+
+def parse_srt(text: str) -> list[dict]:
+    """Parses standard SRT text into {start_sec, end_sec, text} dicts, used by
+    the standalone SRT post-processing tool (pipeline/srt_postprocess.py) to
+    read an externally-translated SRT. Multi-line cue text is collapsed to a
+    single line (same normalization as collect_entries() above) since the
+    downstream cue splitter re-flows text on its own boundaries anyway.
+    Blocks with unparseable timing lines are skipped."""
+    entries = []
+    for block in re.split(r"\r?\n\r?\n", text.strip()):
+        lines = [line for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        timing_idx = next((i for i, line in enumerate(lines) if _TIMING_LINE_RE.search(line)), None)
+        if timing_idx is None:
+            continue
+        m = _TIMING_LINE_RE.search(lines[timing_idx])
+        start_sec = parse_srt_timestamp(m.group(0).split("-->")[0])
+        end_sec = parse_srt_timestamp(m.group(0).split("-->")[1])
+        body = " ".join(" ".join(lines[timing_idx + 1:]).split())
+        if not body:
+            continue
+        entries.append({"start_sec": start_sec, "end_sec": end_sec, "text": body})
+    return entries
 
 
 def collect_entries(manifest: dict, job_dir: Path) -> tuple[list[dict], int, int]:

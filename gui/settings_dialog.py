@@ -210,7 +210,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(w)
 
         self.text_correction_enabled = QCheckBox(
-            "Text Correction 활성화 (postprocessing.md §12.2) -- 설정 저장만 지원, 파이프라인 실행 연동은 차기 버전"
+            "Text Correction 활성화 (postprocessing.md) -- Phase B 완료 후 별도 텍스트 LLM으로 재교정 + 자막 재분할"
         )
         layout.addWidget(self.text_correction_enabled)
 
@@ -308,24 +308,23 @@ class SettingsDialog(QDialog):
         sdform.addRow("Trigger Length Chars", self.tc_trigger_length_chars)
         tc_layout.addWidget(sd_box)
 
-        # -- cue_splitter (§12.2 "cue_splitter", §11) --
-        cs_box = QGroupBox("Cue Splitter (§11)")
+        # -- cue_splitter (§12.2 "cue_splitter", §11.1 1차 분할만 -- 화자 마커
+        # 기준 분할에 쓰이는 필드만 여기 남는다. CPS 기반 길이 분할(2차 분할)은
+        # 번역 후 수동 실행되는 "후처리" 도구(메인 화면, srt_postprocess.py)로
+        # 이전됐다 --
+        cs_box = QGroupBox("Cue Splitter -- 화자 분할 (§11.1 1차)")
         csform = QFormLayout(cs_box)
-        self.tc_cps_threshold = QSpinBox()
-        self.tc_cps_threshold.setRange(1, 100)
-        csform.addRow("CPS Threshold (초당 문자수)", self.tc_cps_threshold)
-        self.tc_max_cue_duration_sec = QDoubleSpinBox()
-        self.tc_max_cue_duration_sec.setRange(0.0, 60.0)
-        self.tc_max_cue_duration_sec.setSingleStep(0.5)
-        self.tc_max_cue_duration_sec.setSpecialValueText("미설정 (null, 무제한)")
-        csform.addRow("Max Cue Duration (sec)", self.tc_max_cue_duration_sec)
-        self.tc_min_cue_duration_sec = QDoubleSpinBox()
-        self.tc_min_cue_duration_sec.setRange(0.0, 10.0)
-        self.tc_min_cue_duration_sec.setSingleStep(0.1)
-        self.tc_min_cue_duration_sec.setSpecialValueText("미설정 (null, 무제한)")
-        csform.addRow("Min Cue Duration (sec)", self.tc_min_cue_duration_sec)
+        self.tc_gap_sec = QDoubleSpinBox()
+        self.tc_gap_sec.setRange(0.0, 2.0)
+        self.tc_gap_sec.setSingleStep(0.01)
+        self.tc_gap_sec.setDecimals(2)
+        csform.addRow("분할된 대사 간 대기시간 (sec)", self.tc_gap_sec)
         self.tc_show_speaker_label = QCheckBox("화자 라벨 화면 노출 (기본 OFF)")
         csform.addRow(self.tc_show_speaker_label)
+        cs_note = QLabel("CPS 기준 길이 분할은 메인 화면의 \"후처리\" 버튼(번역 완료된 SRT 대상)으로 이동했습니다.")
+        cs_note.setWordWrap(True)
+        cs_note.setStyleSheet("color: gray; font-size: 11px;")
+        csform.addRow(cs_note)
         tc_layout.addWidget(cs_box)
 
         layout.addWidget(self.tc_box)
@@ -505,9 +504,7 @@ class SettingsDialog(QDialog):
         self.tc_trigger_length_chars.setValue(tc_speaker.get("trigger_length_chars", 100))
 
         tc_cue = tc.get("cue_splitter", {})
-        self.tc_cps_threshold.setValue(tc_cue.get("cps_threshold", 15))
-        self.tc_max_cue_duration_sec.setValue(tc_cue.get("max_cue_duration_sec") or 0.0)
-        self.tc_min_cue_duration_sec.setValue(tc_cue.get("min_cue_duration_sec") or 0.0)
+        self.tc_gap_sec.setValue(tc_cue.get("gap_sec", 0.08))
         self.tc_show_speaker_label.setChecked(tc_cue.get("show_speaker_label", False))
 
         self.tc_box.setEnabled(self.text_correction_enabled.isChecked())
@@ -608,9 +605,7 @@ class SettingsDialog(QDialog):
                 "trigger_length_chars": self.tc_trigger_length_chars.value(),
             },
             "cue_splitter": {
-                "cps_threshold": self.tc_cps_threshold.value(),
-                "max_cue_duration_sec": self.tc_max_cue_duration_sec.value() or None,
-                "min_cue_duration_sec": self.tc_min_cue_duration_sec.value() or None,
+                "gap_sec": self.tc_gap_sec.value(),
                 "show_speaker_label": self.tc_show_speaker_label.isChecked(),
             },
         }
