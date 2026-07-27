@@ -1,7 +1,7 @@
-# Media Transcriber (SRT Generator) - Design v3.2
+# Media Transcriber (SRT Generator) - Design v3.4
 
-문서 버전: 3.3 (2026-07-19)
-이 문서는 **자기완결적 최종본**이며, v3.2에서 실제 구현 코드(GUI + CLI 파이프라인, 2026-07-09 기준 end-to-end 동작 확인)와 문서를 동기화했다. 구현과 어긋났던 서술(포트, config 스키마, manifest 스키마, SRT 갱신 방식, 설정 창 구조 등)을 코드 기준으로 정정했다 — 상세는 부록 A "v3.1 → v3.2". v3.3은 Phase C의 화자분할/길이분할 실행 시점을 분리하고 독립 "후처리" 버튼/모달을 추가했으며, "이어하기(Resume)"가 매번 Phase A(VAD)를 불필요하게 재실행하던 버그를 고쳤다 — 상세는 부록 A "v3.2 → v3.3".
+문서 버전: 3.4 (2026-07-27)
+이 문서는 **자기완결적 최종본**이며, v3.2에서 실제 구현 코드(GUI + CLI 파이프라인, 2026-07-09 기준 end-to-end 동작 확인)와 문서를 동기화했다. 구현과 어긋났던 서술(포트, config 스키마, manifest 스키마, SRT 갱신 방식, 설정 창 구조 등)을 코드 기준으로 정정했다 — 상세는 부록 A "v3.1 → v3.2". v3.3은 Phase C의 화자분할/길이분할 실행 시점을 분리하고 독립 "후처리" 버튼/모달을 추가했으며, "이어하기(Resume)"가 매번 Phase A(VAD)를 불필요하게 재실행하던 버그를 고쳤다 — 상세는 부록 A "v3.2 → v3.3". **v3.4는 메인 UI를 STT/번역/후처리 3-탭 구조로 재편하고, 번역 기능(마커 기반 자체 LLM 번역 + DeepL 등 외부 도구 왕복, §5C)과 STT 배치 큐(다중 파일 순차 처리, §7.1)를 신규 설계했으며, config.json을 탭별 3개 파일(`config-stt.json`/`config-translate.json`/`config-postprocessing.json`, §9)로 분해했다 — 아직 미구현, 설계만 확정된 상태다 (상세는 §5C, §7, §8.7, §9, 부록 A "v3.3 → v3.4").**
 
 동반 문서: 설치/환경 준비는 [SETUP.MD](SETUP.MD), 단계별 개발 로드맵은 [phase_a_roadmap.md](phase_a_roadmap.md), CLI 스크립트 사용법은 [pipeline/README.md](pipeline/README.md), 실측 기록은 [TESTING.md](TESTING.md), Phase C(텍스트 후처리) 설계는 [postprocessing.md](postprocessing.md).
 
@@ -49,6 +49,8 @@ Media Transcriber는 오디오 또는 동영상 파일을 입력받아 음성을
 * 언어 힌트(§5A.8) 및 사용자 용어집 주입(Custom Vocabulary, §5B.2)
 * 이전 인식 결과를 컨텍스트로 전달 (Context Carryover)
 * 작업 중단 및 **재시작(Resume)** / 완전 취소(임시 파일 즉시 삭제)
+* **STT 배치 처리(대기열)** — 작업 중 추가로 드롭된 파일(또는 유휴 상태에서 여러 파일을 한 번에 드롭)을 큐에 쌓아 순차 실행 (§7.1, v3.4 설계)
+* **번역 탭** — 마커 기반 자체 LLM 번역 + DeepL 등 외부 번역 도구 왕복(Copy/Paste) 지원 (§5C, §7.2, v3.4 설계)
 * llama-server 자동 실행/종료 (Managed 모드)
 * 반복/무한반복 할루시네이션 필터 (opt-in, §21)
 * GUI 외 **독립 실행 CLI 파이프라인** 제공 — 단계별 스크립트 또는 end-to-end 러너 (§3)
@@ -388,6 +390,165 @@ Custom Vocabulary (선택)
 
 ---
 
+## 5C. 번역(Translation) 기능 (v3.4 설계 — 미구현)
+
+### 5C.1 배경과 목표
+
+기존 워크플로우(postprocessing.md §14A)는 Phase C가 화자 마커 기준 1차 분할까지만 자동 수행한 뒤, 사용자가 `{입력파일명}.srt`를 **외부 번역 도구**(DeepL 등)에 수동으로 넣어 번역하고, 그 결과를 다시 "후처리(SRT 후처리)" 도구로 CPS 길이 분할하는 3단계 수동 릴레이였다.
+
+v3.4는 이 워크플로우를 앱 안의 **"번역" 탭**으로 흡수한다. 목표는 두 가지 번역 경로를 모두 지원하는 것이다.
+
+* **자체 번역**: §5B.3 Text Correction과 같은 역할(후처리용 텍스트 LLM)의 서버를 앱 내부에서 호출해 번역. config 파일 분해 결정(§9, v3.4)에 따라 **Text Correction과 서버 설정을 공유하지 않고 독립적으로 구성**한다 — §5C.8 참고.
+* **외부 번역 왕복**: DeepL 등 브라우저 기반 번역 UI로 원문을 내보내고(Copy) 번역 결과를 받아오는(Paste) 기존 수동 경로도 그대로 지원 — 특정 언어쌍에서 전용 번역 서비스 품질이 더 나을 수 있고, 로컬 LLM이 없는 환경의 폴백이기도 하다.
+
+두 경로 모두 **cue 단위 정렬이 깨지지 않아야 한다**는 동일한 요구사항을 가지므로, 아래 §5C.3의 시리얼 마커 프로토콜로 공통 처리한다.
+
+### 5C.2 파이프라인 내 위치 — 탭 구조
+
+메인 윈도우가 **STT / 번역 / 후처리** 3개 탭으로 재편된다(§7). 탭 순서 자체가 파이프라인 순서를 반영한다.
+
+```
+[STT 탭]                  [번역 탭]                    [후처리 탭]
+Phase A→B→C(1차 분할)  →  마커 기반 번역(자체/외부)  →  CPS 길이 분할(§11.1 2차)
+{입력파일명}.srt 생성        같은 파일명으로 덮어씀           같은 파일명으로 덮어씀
+                            (.srt.bak 백업)                 (.srt.bak 백업)
+```
+
+번역 탭은 STT 탭이 방금 만든 `{입력파일명}.srt`를 전환 시 자동으로 원문으로 불러오되, 탭 자체는 STT 작업과 **독립적으로 동작**한다 — 후처리 탭(§7.3)과 동일한 철학으로, 파일 열기 버튼/드래그앤드롭으로 임의의 SRT 파일을 직접 선택해 불러올 수도 있다.
+
+### 5C.3 `[nnnn]|` 시리얼 마커 프로토콜
+
+번역 탭은 SRT를 그대로 다루지 않고, 각 cue를 **4자리 zero-padding 시리얼 마커**를 붙인 평문으로 변환해 다룬다.
+
+```
+[0001]|안녕하세요, 오늘은
+날씨가 참 좋네요.
+[0002]|다음 안건으로 넘어가겠습니다.
+[0003]|...
+```
+
+* 마커는 **cue의 첫 줄에만** 붙는다. cue 대사가 여러 줄(줄바꿈 포함)이면, 이어지는 줄은 마커 없이 원래 줄바꿈 그대로 이어진다 — 다음 `[nnnn]|`이 나오기 전까지의 모든 텍스트가 해당 cue에 속한다(§5C.5의 파싱 규칙과 대응).
+* 시리얼 번호는 SRT의 cue 인덱스(1부터)를 4자리로 zero-padding한 값이다. `chunk_NNNN.txt`(§14.2, postprocessing.md §5) 파일명 관례와 일치시켰다.
+* 이 변환된 텍스트가 번역 탭 좌측(원문) textbox의 내용이 된다.
+
+### 5C.4 번역 탭 UI 및 버튼
+
+```
++-----------------------------------------------------------+
+| [파일 열기]  File: {입력파일명}.srt          (Drag & Drop) |
++------------------------------+------------------------------+
+|           원문 (좌)           |          번역문 (우)          |
+|  [0001]|안녕하세요, 오늘은     |                              |
+|  날씨가 참 좋네요.             |                              |
+|  [0002]|다음 안건으로...       |                              |
++------------------------------+------------------------------+
+[Preprocess] [Copy] [Translate] [Paste] [Merge]
+```
+
+| 버튼 | 동작 |
+|---|---|
+| **Preprocess** | 좌측(원문) textbox 내용을 §5B.3과 동일한 후처리용 로컬 LLM에 보내, 구어체·비문·군더더기를 자연스러운 문장으로 다듬어 **좌측 textbox를 그대로 덮어쓴다**(마커 유지, §5C.6 배치 전략 재사용). **버튼을 누르지 않으면 원문은 STT 산출물 그대로이며 아무 변경도 일어나지 않는다** — 완전 opt-in. 되돌리려면 파일을 다시 불러오면 된다(별도 undo 상태를 두지 않음 — §5C.9 참고). |
+| **Copy** | 좌측(원문) textbox의 전체 텍스트(마커 포함)를 클립보드에 복사. 사용자가 DeepL 등 외부 웹 UI에 붙여넣기 위한 용도. |
+| **Translate** | 좌측 textbox 내용을 §5C.6의 배치 전략으로 후처리용 로컬 LLM에 보내 번역하고, 결과를 우측(번역문) textbox에 채운다. 마커는 그대로 유지된다. |
+| **Paste** | 클립보드 내용을 우측(번역문) textbox에 채운다. DeepL 등에서 번역 후 복사해온 결과를 받는 용도. |
+| **Merge** | 우측 textbox를 §5C.5 규칙으로 파싱해 시리얼별 번역 텍스트를 추출하고, 원본 SRT의 해당 cue 대사를 교체한다. §5C.7 참고. |
+
+### 5C.5 강인한 마커 파싱 (외부 도구 왕복 대응)
+
+DeepL 같은 외부 번역 UI는 원문 서식을 그대로 보존하지 않는다. 실측(§5C.9 확인 필요)에서 예상되는 두 가지 훼손 패턴:
+
+1. **마커 내부에 공백 삽입**: `[0007]|` → `[00 07]|` (번역기가 숫자를 단어처럼 띄어 씀)
+2. **블록 간 줄바꿈 소실**: 서로 다른 `[nnnn]|` 블록 사이 줄바꿈이 사라져 여러 cue가 한 줄로 이어붙음
+
+따라서 파싱은 **줄바꿈에 의존하지 않는다.** 대신:
+
+```
+1. 정규식으로 마커를 모두 찾는다: \[\s*(?:\d\s*){4,}\]\s*\|
+   (대괄호 안 숫자 사이에 공백이 끼어도 매치, 자릿수 공백 제거 후 정수로 파싱)
+2. 문서 전체에서 마커의 위치(시작 인덱스)를 오름차순으로 나열한다.
+3. cue N의 내용 = "마커 N의 끝 위치" ~ "다음 마커의 시작 위치" (또는 문서 끝) 사이의 텍스트.
+   → 블록 사이 줄바꿈이 사라져 있어도, 다음 마커 자체가 경계 역할을 하므로 영향받지 않는다.
+4. 추출된 내용의 앞뒤 공백만 trim한다 (내부 줄바꿈은 유지 — §5C.3 여러 줄 cue 대응).
+```
+
+자체 번역(Translate 버튼) 경로도 **동일한 파서를 재사용**한다 — 로컬 LLM이라도 프롬프트 지시를 완벽히 지키지 못해 마커 서식이 흔들릴 수 있으므로, "믿을 수 있는 입력이니 단순 split(`\n`)으로 처리" 같은 지름길을 두지 않는다. 결과적으로 Translate/Paste 어느 경로로 채워졌든 Merge는 같은 파싱 로직 하나로 처리한다.
+
+### 5C.6 배치 처리 전략 (Preprocess / Translate 공통)
+
+문서 전체를 한 번의 LLM 호출로 보내지 않는다. 대신:
+
+```
+1. config의 context 예산(문자 수 기준, §5C.8 context_max_chars)을 confirm.
+2. [nnnn]| 마커로 시작하는 cue 단위를 순서대로 누적하면서, 누적 문자 수가
+   예산을 넘기 직전까지를 한 배치로 묶는다 (cue 중간에서 자르지 않음 —
+   §5C.3의 "다음 마커 전까지가 한 cue" 경계와 동일한 단위로 자름).
+3. 배치를 순서대로 LLM에 순차 전송 (병렬 아님 — 첫 구현은 단순성 우선,
+   text_correction과 동일한 판단, postprocessing.md §6 "문장별 병렬 처리 가능" 참고).
+4. 각 배치 응답을 순서대로 이어붙여 대상 textbox(Preprocess는 좌측, Translate는
+   우측)를 채운다. 진행 중에는 "배치 3/7 처리 중..." 형태로 진행 상황을 표시한다
+   (Phase B의 ETA 표시 §16과 같은 UX 패턴).
+5. 한 cue 자체가 예산을 초과하는 예외 케이스는 §6 "긴 파일 처리"와 동일하게
+   해당 cue 단독 배치로 강제 전송한다.
+```
+
+문자 수 → 토큰 수 환산은 정밀 토크나이저 대신 **문자 수 기반 근사치**를 쓴다(질문 답변에서 확인된 요구사항). 언어별 문자/토큰 비율이 다르므로(CJK는 문자당 토큰 밀도가 높음) 예산에 여유 마진을 둔다 — 정확한 마진 값은 실측 후 확정(§5C.9).
+
+Preprocess와 Translate는 **프롬프트만 다르고 배치·전송 로직은 동일한 함수를 공유**한다:
+
+* Preprocess 프롬프트 방향: "다음은 음성 인식 결과입니다. `[nnnn]|` 마커는 절대 수정하지 말고 그대로 출력하세요. 각 cue의 의미를 바꾸지 않는 선에서 구어체 filler, 반복, 비문을 자연스러운 문장으로 다듬으세요."
+* Translate 프롬프트 방향: "다음은 자막 원문입니다. `[nnnn]|` 마커는 절대 수정하지 말고 그대로 출력하세요. 각 cue를 {target_language}로 자연스럽게 번역하세요. cue 순서와 개수를 유지하세요." — §5B.2 Custom Vocabulary를 여기서도 재사용해 고유명사 번역 일관성을 높인다(text_correction과 동일한 재사용 패턴).
+
+### 5C.7 Merge 동작과 누락 처리
+
+```
+1. §5C.5로 우측(번역문) textbox를 파싱해 {시리얼: 텍스트} 맵을 만든다.
+2. 원본 SRT의 각 cue를 순회하며, 맵에 해당 시리얼이 있으면 대사를 교체하고
+   없으면 원문 그대로 둔다 (침묵 실패 금지 — 빠지는 cue가 없어야 한다는
+   요구사항의 핵심).
+3. 결과를 같은 파일명으로 덮어쓰고, 원본은 {파일명}.srt.bak으로 백업한다
+   (기존 srt_postprocess.py/text_correction.py의 원본 보존 관례와 동일, §5B.3).
+4. Merge 완료 후 "원본 cue 수 N개 / 번역 매칭 M개 (누락 N-M개)"를 로그·상태
+   라벨에 표시한다. 누락이 있으면 어떤 시리얼이 누락됐는지도 로그에 남겨,
+   사용자가 Copy→(외부 번역)→Paste를 반복해 나머지만 채울 수 있게 한다.
+```
+
+### 5C.8 config-translate.json 반영
+
+번역 설정은 **`config-translate.json`이라는 별도 파일**에 담긴다(§9의 config 3분해 결정, v3.4). `text_enhancement.text_correction.server`(config-stt.json 소속)를 참조하지 않고, **서버 설정을 독립적으로 중복 정의**한다 — config를 도메인별로 쪼갠 목적 자체가 탭 간 결합 제거이므로, 파일 간 참조를 두지 않기로 했다(§9).
+
+```json
+"translation": {
+  "target_language": "en",
+  "context_max_chars": 20000,
+  "preprocess_prompt": "...(§5C.6 방향의 기본 템플릿)...",
+  "translate_prompt": "...(§5C.6 방향의 기본 템플릿, {{target_language}} 치환)...",
+
+  "server": {
+    "url": "http://localhost:8082/v1/chat/completions",
+    "launch_mode": "external",
+    "server_binary": "",
+    "model_path": "",
+    "port": 8082,
+    "extra_args": "--ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-budget 0 --jinja",
+    "startup_timeout_sec": 120
+  }
+}
+```
+
+* `target_language`: Translate 프롬프트의 `{{target_language}}`에 치환.
+* `context_max_chars`: §5C.6 배치 예산의 단일 소스.
+* `server`: `text_enhancement.text_correction.server`(config-stt.json)와 같은 스키마를 쓰지만 **완전히 별개의 설정값**이다. 기본 포트를 8082로 둔 것은 STT(8080)·Phase C 텍스트 교정(8081)과 겹치지 않게 하기 위한 것일 뿐, 실사용자가 반드시 별도 포트에 별도 서버를 띄워야 한다는 뜻은 아니다 — 원칙 2(VRAM 엄격 관리)를 지키려면 오히려 **같은 URL/포트를 가리키게 설정**하거나 필요 시점에만 순차로 띄우는 운용이 권장된다. 이 운용은 config 스키마로 강제되지 않는다(§24).
+
+### 5C.9 버전 범위 / 남은 이슈
+
+* 이번 라운드는 **설계만 확정**한다. 구현 착수 전에 다음을 실측/확정해야 한다.
+  * DeepL 웹 UI로 실제 왕복했을 때 마커가 정확히 어떻게 훼손되는지(§5C.5는 예상 패턴 기반 설계) — 실물 샘플로 정규식 검증 필요.
+  * 문자 수 → 토큰 수 근사 비율과 안전 마진 (§5C.6) — 언어별로 다를 가능성.
+  * Preprocess의 "되돌리기" 필요성 — 현재는 파일 재로드로만 되돌릴 수 있는 단순 설계로 확정했으나(§5C.4), 실사용에서 불편하면 별도 원본 보존으로 갱신.
+* 구현 후 실사용 테스트에서 문제가 발견되면 그때 논의한다 (2026-07-27, §24).
+
+---
+
 ## 6. 로컬 서버 실행 환경 (llama-server)
 
 ### 6.1 실행 커맨드 (External 모드 기준)
@@ -486,53 +647,113 @@ provider == "gemini" →
 
 ---
 
-## 7. 메인 UI
+## 7. 메인 UI (v3.4 설계 — 3-탭 구조로 재편, 미구현)
 
-### 상단
+### 7.0 전체 구조 — 탭 컨테이너
+
+메인 윈도우는 파이프라인 순서를 그대로 반영하는 3개 탭으로 구성된다.
+
+```
++---------------------------------------------------------+
+| Media Transcriber                          [Settings]   |
++---------------------------------------------------------+
+| [ STT ] [ 번역 ] [ 후처리 ]                               |
++---------------------------------------------------------+
+|                (선택된 탭의 내용)                          |
++---------------------------------------------------------+
+```
+
+* **탭 순서 = 파이프라인 순서**: STT(Phase A→B→C 1차 분할) → 번역(§5C) → 후처리(CPS 2차 분할, §11.1).
+* **[Settings]는 탭 바깥, 항상 보이는 위치로 이동**한다 — 특정 파이프라인 단계에 속한 동작이 아니라 config.json 전역 설정이므로, 어느 탭에 있든 접근 가능해야 한다는 판단(기존에는 STT 하단 버튼 줄에 있었음). 세 탭 모두 같은 config.json을 공유한다.
+* 세 탭은 서로 독립적으로 동작 가능하다(§7.1의 배치 큐가 실행 중이어도 번역/후처리 탭 조작 가능) — 단, 번역 탭은 STT 탭이 만든 결과를 편의상 자동으로 이어받는다(§7.2).
+* 창 닫기 시 STT 탭에 진행 중인 작업(현재 파일 또는 큐)이 있으면 기존과 동일하게 "중단하고 종료하시겠습니까?" 확인 후 현재 chunk 완료를 기다렸다가 종료한다.
+
+### 7.1 STT 탭
+
+기존 메인 화면(v3.3까지의 §7)이 그대로 이 탭이 되며, **배치 처리(대기열)** 가 v3.4에서 추가된다.
 
 ```text
 +---------------------------------------------------+
 | File : [ Selected File ]           [Select File] |
 +---------------------------------------------------+
-```
-
-* 파일 경로 표시, Drag & Drop 지원, 파일 선택
-
-### 중앙
-
-```text
-+---------------------------------------------------+
 |              SRT Output TextBox                   |
 +---------------------------------------------------+
-```
-
-* Read Only, 자동 스크롤, 실시간 갱신
-
-### 하단
-
-```text
+| 대기열 (2개 대기중)                                  |
+|  ⏳ interview_02.mp4        대기중        [제거]     |
+|  ⏳ interview_03.mp4        대기중        [제거]     |
 +---------------------------------------------------+
 | Phase/상태 라벨 (예: "Transcribing chunk 5/40 - 3:12 remaining...") |
 +---------------------------------------------------+
 | Progress Bar  (Phase B: "done/total (%)" 표기)      |
 +---------------------------------------------------+
 
-[Transcript] [완전 취소 (임시파일 삭제)] [Copy] [Settings] [후처리]
+[Transcript] [완전 취소 (임시파일 삭제)] [Copy]
 (작업 중: Transcript 버튼이 Stop으로 동작)
 ```
 
-* **Phase/상태 라벨**: Phase A 각 단계("오디오 추출 중...", "VAD 분석 중...", "Chunk 생성 중...")와 Phase B 진행 상황을 표시. Phase B에서는 완료된 chunk들의 평균 소요 시간으로 **남은 시간(ETA)**을 함께 표시한다 (Resume 시 이전 세션의 `transcribe_elapsed_sec` 기록까지 합산해 첫 chunk부터 정확).
-* **[Transcript]/[Stop]**: 작업 시작/중단 토글. Stop은 현재 chunk 완료 후 정지하며 temp는 보존된다(§16).
-* **[완전 취소]** (v3.2 신설): Stop과 달리 `temp/{job_id}/`를 **즉시 삭제**해 Resume 자체를 포기하는 버튼. 작업 중이면 확인 다이얼로그 후 중단+삭제, 작업 전이면 해당 파일의 기존 temp만 삭제. 실수 방지를 위해 항상 확인 다이얼로그를 거친다.
-* **[후처리]** (v3.3 신설, `gui/srt_postprocess_dialog.py`): 현재 작업(Transcript job)과 무관하게 항상 활성화된 독립 버튼. 클릭 시 모달 "SRT 후처리" 창이 뜬다 — 번역까지 마친 임의의 SRT 파일을 선택해 CPS(초당 문자수) 기준 길이 분할만 실행하는 도구(postprocessing.md §11.1 2차 분할, §14A). 자동 Phase C(아래 §8.4)는 화자 분할까지만 하고 멈추므로, 그 뒤 외부 번역을 거친 SRT에 대해 이 버튼으로 길이 분할을 마무리한다. 모달 안에 파일 선택/옵션(CPS Threshold, Max/Min Cue Duration, Gap)/실행 버튼/실행 로그가 모두 들어있다. 결과는 원본을 `{파일명}.srt.bak`으로 백업한 뒤 같은 파일명으로 덮어쓴다.
-* 이전 작업(임시 파일)이 감지된 입력 파일 선택 시 "이어하기/새로 시작/취소" 3버튼 다이얼로그 표시 (§14.3).
-* 창 닫기 시 작업이 진행 중이면 "중단하고 종료하시겠습니까?" 확인 후 현재 chunk 완료를 기다렸다가 종료한다.
+* 파일 경로 표시, Drag & Drop 지원, 파일 선택, SRT 실시간 표시(Read Only, 자동 스크롤)는 기존과 동일.
+* **[Copy]**: TextBox의 전체 SRT 내용을 클립보드에 복사 (기존과 동일, §16).
+* **[완전 취소]**(v3.2)와 Resume 3버튼 다이얼로그(§14.3)는 기존과 동일하되, 이제 **현재 처리 중인 파일에만** 적용된다 — 대기열의 나머지 항목에는 영향 없음.
+* **[후처리] 버튼은 제거**된다 — 같은 기능이 이제 후처리 탭(§7.3)으로 흡수됐기 때문.
+
+**배치 처리(대기열) — v3.4 신설:**
+
+```
+[idle 상태에서 파일 1개 drop] → source_path로 설정 (기존과 동일, 자동 시작 안 함)
+[idle 상태에서 파일 여러 개 drop] → 전부 대기열에 추가, 대기 상태로 표시
+                                     → 사용자가 [Transcript]를 눌러야 대기열 전체 시작
+[작업 진행 중에 파일 drop (1개든 여러 개든)] → 전부 대기열 맨 뒤에 추가
+                                              → 현재 작업 완료 후 자동으로 다음 항목 시작
+```
+
+* **대기열 목록은 화면에 항상 표시**된다(파일명 + 상태: 대기중/진행중/완료) — 사용자가 몇 개 남았는지, 다음이 무엇인지 확인 가능. 대기중 항목은 개별 [제거] 버튼으로 대기열에서 뺄 수 있다.
+* 대기열은 **STT만 순차 실행하고 번역은 자동으로 이어가지 않는다** — 번역 탭 진입은 항상 사용자가 명시적으로 한다(§7.2). 대기열의 각 파일도 Phase C 1차 분할(화자 마커 기준)까지는 기존과 동일하게 자동 수행된다 — 그 산출물이 `{입력파일명}.srt`라는 점은 단일 파일 처리와 동일.
+* **대기열 자동 진행 중 Resume 여부**: 사용자가 직접 클릭해서 시작한 첫 파일은 기존과 동일하게 "이어하기/새로 시작/취소" 3버튼 다이얼로그를 띄운다. 그러나 **대기열이 자동으로 다음 파일로 넘어갈 때는 모달을 띄우지 않고, 기존 temp가 있으면 자동으로 이어하기(Resume)를 기본값으로 진행**한다 — 무인 배치 처리가 목적이므로 매 파일마다 확인을 요구하면 배치의 의미가 없다는 판단. (설계 판단 — 실사용에서 불편하면 재검토, §24)
+* **[Stop]**: 현재 처리 중인 파일만 중단하며(기존과 동일, 현재 chunk 완료 후 정지), **대기열의 자동 진행도 함께 멈춘다** — 남은 항목은 대기열에 그대로 남아있고, 사용자가 다시 [Transcript]를 눌러야 재개된다. "Stop = 지금 잠깐 멈춤"이라는 기존 의미를 배치 전체로 확장한 것.
+* **[완전 취소]**: 현재 처리 중인 파일의 temp만 삭제한다. 대기열의 나머지 항목(아직 시작 안 한 파일들)은 영향받지 않는다.
+
+### 7.2 번역 탭
+
+§5C에서 설계한 마커 기반 번역 UI. 상세는 §5C.4 참고.
+
+```text
++-----------------------------------------------------------+
+| [파일 열기]  File: {입력파일명}.srt          (Drag & Drop) |
++------------------------------+------------------------------+
+|           원문 (좌)           |          번역문 (우)          |
++------------------------------+------------------------------+
+[Preprocess] [Copy] [Translate] [Paste] [Merge]
+```
+
+* **원문 입력**: STT 탭에서 작업이 완료되면 그 산출물(`{입력파일명}.srt`)을 번역 탭 전환 시 자동으로 좌측 textbox에 불러온다. 동시에 상단 파일 열기 버튼/드래그앤드롭으로 임의의 다른 SRT 파일을 직접 선택해 불러올 수도 있다(자동 로드를 덮어씀) — 후처리 탭과 동일하게 STT 작업 흐름과 독립적으로도 쓸 수 있어야 한다는 요구사항.
+* 버튼 5개(Preprocess/Copy/Translate/Paste/Merge)의 동작은 §5C.4 표, 배치 처리는 §5C.6, Merge와 누락 처리는 §5C.7 참고.
+
+### 7.3 후처리 탭
+
+기존 v3.3의 독립 모달(`gui/srt_postprocess_dialog.py`)이 탭으로 흡수된 것 — **기능은 동일**하고 컨테이너만 QDialog에서 탭으로 바뀐다.
+
+```text
++-----------------------------------------------------------+
+| [파일 열기]  File: {대상}.srt                (Drag & Drop) |
++-----------------------------------------------------------+
+| CPS Threshold [   ]  Max Cue Duration [   ]                |
+| Min Cue Duration [   ]  Gap [   ]                          |
++-----------------------------------------------------------+
+| [실행]                                                      |
++-----------------------------------------------------------+
+|                    실행 로그                                |
++-----------------------------------------------------------+
+```
+
+* **입력 파일**: 번역 탭에서 [Merge]가 끝나면 그 결과 파일(번역 탭과 같은 파일명)을 후처리 탭 전환 시 자동으로 불러온다 — §7.2의 "STT 탭 완료 → 번역 탭 자동 로드"와 동일한 패턴을 한 단계 더 이어간 것(STT → 번역 → 후처리 모두 "직전 탭 산출물 자동 로드"로 일관). 동시에 상단 [파일 열기] 버튼/드래그앤드롭으로 **임의의 다른 SRT 파일을 직접 선택해 자동 로드를 덮어쓸 수 있다** — 번역 탭을 거치지 않고 이미 번역이 끝난 SRT를 곧바로 이 탭에서 길이 분할만 하고 싶은 경우(예: 외부에서 이미 완성한 파일)를 위한 것으로, STT/번역 작업 흐름과 무관하게 항상 독립적으로 쓸 수 있어야 한다는 원칙(§7.0)을 그대로 따른다.
+* CPS(초당 문자수) 기준 길이 분할(2차 분할, postprocessing.md §11.1)만 실행하는 도구. STT 탭의 배치 큐, 번역 탭과 무관하게 항상 조작 가능.
+* 옵션(CPS Threshold, Max/Min Cue Duration, Gap)/실행 버튼/실행 로그 구성은 기존 모달과 동일(§8.4 구현 내역 참고). 결과는 원본을 `{파일명}.srt.bak`으로 백업한 뒤 같은 파일명으로 덮어쓴다.
 
 ---
 
 ## 8. 설정 창
 
-Modal Dialog + **탭 구조**로 구현되어 있다 (`gui/settings_dialog.py`): `VAD` / `Provider` / `용어집` / `후처리` / `Prompt` / `모델 파라미터`. `[OK]`는 config.json 저장 후 닫기, `[Cancel]`은 변경사항 폐기. 저장된 설정은 다음 작업 시작 시점에 다시 로드되어 반영된다.
+Modal Dialog + **탭 구조**로 구현되어 있다 (`gui/settings_dialog.py`): `VAD` / `Provider` / `용어집` / `후처리` / `번역` / `Prompt` / `모델 파라미터` (`번역` 탭은 v3.4 신설, §8.7). `[OK]`는 config.json 저장 후 닫기, `[Cancel]`은 변경사항 폐기. 저장된 설정은 다음 작업 시작 시점에 다시 로드되어 반영된다.
 
 ### 8.1 VAD 탭 (v3.2 신설)
 
@@ -671,13 +892,72 @@ Temperature   Top-P   Top-K   Max Tokens
 * Gemma 4 권장 샘플링 값이 top-k 64를 포함하므로 Top-K 노출. Gemini API 사용 시 Top-K는 `generationConfig.topK`로 전달.
 * 임시 파일 정리: 정상 완료(실패 chunk 0건) 시에만 `temp/{job_id}/`를 삭제한다. 중단/크래시 시에는 재시작(Resume)을 위해 항상 보존(§14.4).
 
+### 8.7 번역 탭 (v3.4 신설)
+
+```text
+API URL   : http://localhost:8082/v1/chat/completions
+
+Launch Mode
+(o) External   ( ) Managed
+
+번역 서버 실행 파일 경로 : (Managed 모드에서만 사용)
+모델 파일 경로              :
+
+[Managed 모드 선택 시에만 활성화]
+포트                        : 8082
+추가 인자 (선택)            : --ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-budget 0 --jinja
+
+[Test Connection]
+
+출력 언어 (번역 대상)
+[en ▾]   (한국어/日本語/中文/English/기타 코드 직접입력)
+
+컨텍스트 예산 (문자 수 기준) [ 20000 ]
+  Preprocess/Translate 배치 처리 시 한 번의 LLM 호출에 담을 최대 문자 수 (§5C.6)
+
+Preprocess 프롬프트
+[                                                    ]
+[Load] [Save] [Save As]
+
+Translate 프롬프트
+[                                                    ]
+[Load] [Save] [Save As]
+```
+
+* **서버 설정은 후처리(Text Correction) 탭(§8.4)과 별개로 이 탭에서 독립적으로 관리한다** — config 3분해 결정(§9, v3.4)에 따라 config-translate.json이 자체 `server` 블록을 가지며, config-stt.json의 `text_correction.server`를 참조하지 않는다(§5C.8). UI 구성은 Provider 탭(§8.2)의 Local llama-server 설정과 동일한 패턴(URL/Launch Mode/경로/포트/추가 인자/Test Connection).
+* 안내 문구(탭 하단 고정 표시): "이 서버와 후처리(Text Correction) 서버를 동시에 띄우면 VRAM을 이중으로 점유합니다. 가능하면 같은 URL/포트를 가리키도록 설정하거나, 필요할 때만 순차로 기동하세요." (§24, 원칙 2)
+* `출력 언어`는 Translate 프롬프트의 `{{target_language}}`에 치환된다.
+* Prompt 탭(§8.5)과 마찬가지로 멀티라인 텍스트 박스 + Load/Save/Save As 구성. 기본 템플릿 방향은 §5C.6 참고. `[nnnn]|` 마커를 그대로 보존하라는 지시문은 기본 템플릿에 항상 포함되며, 사용자가 프롬프트를 고쳐도 이 지시문 자체는 유지를 권장(안내 문구로 표시).
+
 ---
 
-## 9. 설정 파일
+## 9. 설정 파일 (v3.4 — 3개 도메인 파일로 분해, 미구현)
 
-**두 파일 체계**: 저장소에는 안전한 기본값을 담은 `config.example.json`(추적됨)이 있고, 실제 사용 설정은 `config.json`(gitignore 대상 — Gemini API 키/로컬 경로가 저장소에 커밋되지 않도록)이다. 로드 순서는 `config.json` → 없으면 `config.example.json` → 둘 다 없으면 내장 폴백(`pipeline/common.py`). GUI Settings에서 [OK]를 누르면 `config.json`으로 저장된다.
+메인 윈도우의 3-탭 구조(§7)에 맞춰, 기존 단일 config.json 체계를 **탭별 3개 파일**로 나눈다.
 
-config.example.json (실물, v3.2 기준):
+| 파일 | 대응 탭 | 담당 내용 |
+|---|---|---|
+| `config-stt.json` | STT 탭 (§7.1) | STT Provider(local_api/gemini), 언어, 샘플링, STT 프롬프트, VAD, Custom Vocabulary, Phase C 텍스트 교정(§5B.3)+할루시네이션 필터, 전역 설정(cleanup/logging) |
+| `config-translate.json` | 번역 탭 (§7.2, §5C) | 번역 대상 언어, 컨텍스트 예산, Preprocess/Translate 프롬프트, 번역 전용 텍스트 LLM 서버 |
+| `config-postprocessing.json` | 후처리 탭 (§7.3) | CPS 길이 분할 파라미터 (`srt_postprocess`) |
+
+기존 "두 파일 체계"(추적되는 안전한 기본값 파일 + gitignore되는 실사용 파일)는 **파일마다 동일하게 유지**한다 — 3도메인 × 2벌 = 총 6개 파일:
+
+```
+config-stt.example.json             config-stt.json
+config-translate.example.json       config-translate.json
+config-postprocessing.example.json  config-postprocessing.json
+```
+
+로드 순서는 파일별로 독립적으로 동일한 규칙을 따른다: `config-{domain}.json` → 없으면 `config-{domain}.example.json` → 둘 다 없으면 내장 폴백(`pipeline/common.py`). GUI Settings에서 [OK]를 누르면, 변경된 값이 속한 도메인 파일에만 저장된다(예: VAD 탭 변경은 `config-stt.json`만 다시 씀).
+
+> **이 문서의 다른 곳(§6.4, §8, §14 등)에서 "config.json"이라고 지칭하는 표현은 v3.4부터 위 3개 파일 중 관련 도메인의 파일을 가리키는 것으로 읽는다** — 문서 전체를 일일이 치환하는 대신 이 문장으로 갈음한다.
+
+**서버 설정을 공유하지 않는 이유**: 번역(`config-translate.json`)과 Phase C 텍스트 교정(`config-stt.json`)은 둘 다 후처리용 텍스트 LLM 서버가 필요하지만, 설계 논의 결과 **파일 간 참조 없이 각자 독립적으로 서버 설정을 중복 정의**하기로 확정했다(§5C.8, §8.7) — 파일을 쪼갠 목적 자체가 탭 간 결합 제거이므로, 상호 참조를 두면 분해의 의미가 옅어진다는 판단. 대신 원칙 2(VRAM 엄격 관리)를 지키는 것은 config 스키마가 아니라 **사용자 운용**(같은 URL/포트를 가리키게 설정하거나 필요 시점에만 순차 기동)에 맡겨진다 — 리스크로 §24에 등재.
+
+**공통 설정을 config-stt.json에 모으는 이유**: Custom Vocabulary(§5B.2, 원래 STT pre-biasing 목적으로 설계됨)와 cleanup/logging(특정 탭에 속하지 않는 전역 설정)은 모두 `config-stt.json`에 둔다 — STT가 파이프라인의 첫 탭이므로 사실상 "기본/공통 파일" 역할을 겸한다는 판단. 번역 탭(§5C.6)이 Custom Vocabulary를 프롬프트에 재사용할 때는 값을 복제하지 않고 **`config-stt.json`을 읽어와 참조**한다 — 값 하나를 여러 곳에서 읽기만 하는 것이라 위 "서버 설정 비공유" 원칙과는 성격이 다르다(서버는 각자 독립된 프로세스를 가리켜야 하므로 공유가 위험하지만, 용어집은 정적 텍스트 목록을 참고만 하는 것이라 공유해도 결합 문제가 생기지 않는다).
+
+### 9.1 config-stt.json (실물, v3.4 기준)
 
 ```json
 {
@@ -722,8 +1002,41 @@ config.example.json (실물, v3.2 기준):
     "strip_infinite_repetition": false,
     "text_correction": {
       "enabled": false,
-      "provider": "local_api",
-      "window_chunks": 5
+
+      "server": {
+        "url": "http://localhost:8081/v1/chat/completions",
+        "launch_mode": "external",
+        "server_binary": "",
+        "model_path": "",
+        "port": 8081,
+        "extra_args": "--ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-budget 0 --jinja",
+        "startup_timeout_sec": 120
+      },
+
+      "sampling": {
+        "temperature": 0.25,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.0,
+        "repetition_penalty": 1.0,
+        "max_tokens": 512
+      },
+
+      "full_context": {
+        "max_segment_chars": 60000,
+        "segment_split_count": 3,
+        "glossary_assist": false
+      },
+
+      "speaker_detection": {
+        "enabled": true,
+        "trigger_length_chars": 100
+      },
+
+      "cue_splitter": {
+        "gap_sec": 0.08,
+        "show_speaker_label": false
+      }
     }
   },
 
@@ -745,7 +1058,44 @@ config.example.json (실물, v3.2 기준):
 }
 ```
 
-주요 사항:
+### 9.2 config-translate.json (v3.4 신설)
+
+```json
+{
+  "translation": {
+    "target_language": "en",
+    "context_max_chars": 20000,
+    "preprocess_prompt": "",
+    "translate_prompt": "",
+
+    "server": {
+      "url": "http://localhost:8082/v1/chat/completions",
+      "launch_mode": "external",
+      "server_binary": "",
+      "model_path": "",
+      "port": 8082,
+      "extra_args": "--ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-budget 0 --jinja",
+      "startup_timeout_sec": 120
+    }
+  }
+}
+```
+
+### 9.3 config-postprocessing.json (v3.4 신설)
+
+```json
+{
+  "srt_postprocess": {
+    "cps_threshold": 15,
+    "max_cue_duration_sec": 7.0,
+    "min_cue_duration_sec": null,
+    "max_chars_per_cue": 40,
+    "gap_sec": 0.08
+  }
+}
+```
+
+### 9.4 항목별 설명 및 기본값 근거
 
 * `provider` 기본값: `local_api`. 기본 모델은 **`qwen3-asr`** — §5A 실측 우선순위와 TESTING.md 검증 결과에 따라 실사용 기본이 Qwen3-ASR로 정착했다 (Gemma4는 여전히 지원 대상, §5.1).
 * `language` 기본값: `auto`. `auto`가 아니면 프롬프트의 `{{language_hint}}`가 `language: {code}\n\n`로 치환되어 전송된다 (§5A.8 실측 근거).
@@ -754,8 +1104,11 @@ config.example.json (실물, v3.2 기준):
 * `local_api.hf_repo` (v3.2 신설): Managed 모드에서 `model_path`가 비어 있으면 `-hf {hf_repo}`로 모델/mmproj 자동 다운로드. `model_path`와 `hf_repo`가 둘 다 비어 있으면 Managed 기동 거부 (§6.3, §8.2).
 * `server_binary`/`model_path`/`mmproj_path`는 `launch_mode`와 무관하게 상시 저장 (모드 전환 시 재입력 방지). subprocess 실행에 실제 사용되는 것은 Managed 모드일 때뿐.
 * `text_enhancement.dedup_repeated_chunks` / `strip_infinite_repetition` (v3.2 신설): 할루시네이션 필터 2종, 기본 OFF. 동작 상세는 §21, UI는 §8.4. `text_correction`(Phase C)과 같은 `text_enhancement` 아래 있지만 **Phase B 소관**이라는 점에 주의 — 역할 구분은 [postprocessing.md](postprocessing.md) §12.1 참고.
+* `text_enhancement.text_correction.server` (config-stt.json 소속): Phase C(§5B.3) 전용 텍스트 LLM 서버. 기본 포트 8081은 STT 서버(8080)와 겹치지 않기 위한 것. **번역 서버(`config-translate.json`, 기본 8082)와는 완전히 독립** — §9 "서버 설정을 공유하지 않는 이유" 참고.
 * `vad` 섹션 (v3.2 신설): §12.2/12.3 파라미터의 단일 소스. CLI 스크립트(`vad_raw_test.py`/`vad_merge.py`/`chunk_export.py`)의 기본값과 GUI VAD 탭(§8.1)이 모두 이 섹션을 읽는다. CLI 인자를 명시하면 그 값이 항상 우선. `max_absorb_gap` 의미는 §12.2.
 * `cleanup.remove_temp_on_success`: 정상 완료(실패 chunk 0건) 시 temp/{job_id}/ 삭제 여부 (기본 true).
+* `translation.server` (config-translate.json, v3.4 신설): §5C.8/§8.7 참고. `text_correction.server`와 스키마는 같지만 값은 독립.
+* `srt_postprocess` (config-postprocessing.json, 기존에는 단일 config.json 소속이었음): CPS 길이 분할 파라미터의 단일 소스 — 후처리 탭(§7.3)이 직접 읽고 쓴다. Settings 다이얼로그를 거치지 않는 유일한 config 파일이라는 점에 주의(§7.3의 인라인 UI가 곧 설정 UI).
 
 ---
 
@@ -991,7 +1344,7 @@ VAD가 검출한 하나의 구간이 30초를 초과할 수 있다(예: 쉼 없�
 
 > 참고(구현 시 확인 필요): Windows에서 `Program Files` 하위 설치 시 일반 사용자 권한으로 쓰기가 제한될 수 있다. 이 경우 `%LOCALAPPDATA%\MediaTranscriber\temp\` 폴백이 필요할 수 있으나, 이번 버전에서는 루트 기준으로 고정하고 문제 확인 시 후속 버전에서 추가한다(§23).
 
-동명 SRT 파일이 이미 존재하는 경우: **현재 구현은 조용히 덮어쓴다.** 덮어쓰기 확인 다이얼로그 vs 자동 `_1` 접미사 도입 여부는 미결정 사항(§24).
+동명 SRT 파일이 이미 존재하는 경우: **조용히 덮어쓴다 (확정, 2026-07-27).** 확인 다이얼로그나 자동 `_1` 접미사는 도입하지 않는다.
 
 임시 디렉토리 구조 (실물):
 
@@ -1315,7 +1668,8 @@ GPU 기반 소스분리 모델(Demucs 등)을 검토했으나 다음 이유로 *
 * Whisper Backend 지원 (B유형 어댑터 — §5A.3)
 * 병렬 Chunk 처리 (llama-server --parallel N 활용)
 * 화자 구분, 맞춤법 교정, 문장 정리
-* 자막 포맷 개선, 번역 자막 생성, 다국어 지원
+* 자막 포맷 개선
+* 번역 자막 생성, 다국어 지원 — **설계 확정, §5C/§7.2/§8.7 참고 (v3.4, 미구현)**. 다국어 지원은 여전히 미정: 현재 설계는 `target_language` 단일 값(§9)이며, 한 SRT에 대해 여러 타깃 언어를 동시에 생성하는 기능은 이 설계에 포함되지 않았다
 * Context Carryover Chunk 개수 설정 (현재 1개 고정)
 * local_api.request_format 옵션 (비표준 포맷 서버 대응)
 * VAD 알고리즘 교체 검토: TEN VAD vs Silero VAD 실측 비교 (§12.1)
@@ -1342,14 +1696,13 @@ GPU 기반 소스분리 모델(Demucs 등)을 검토했으나 다음 이유로 *
 
 ## 24. 미결정 사항 (구현 전/실측 전 확정 필요)
 
-- 동명 SRT 파일 존재 시 처리 방식 — **현재 구현은 조용히 덮어씀**(§13). 덮어쓰기 확인 다이얼로그 vs 자동 접미사 도입 여부 미결정
-- VAD threshold 및 §12.2 병합 임계값의 실전 튜닝 — config `vad` 섹션으로 조정 가능하게 구현됐으나(§8.1, §9), 대표성 있는 테스트 셋 기준의 권장값은 미확정
-- **Stage 0 정식 테스트 셋 부재** — `testset/` (깨끗한 발화/배경음/짧은 감탄사/화자 겹침 4종 + 수동 정답 전사)를 아직 안 만듦. 현재까지의 end-to-end 확인은 임의 파일 4개로 대체 실측 ([pipeline/README.md](pipeline/README.md) 진행 상황)
-- **CER 정량 평가 파이프라인 미연결** — 정답 전사가 있는 클립이 없어 Stage 3에 CER 계산 미부착 (참고 구현: `tools/eval_language_hint.py`)
-- 사람이 직접 하는 검증들(Stage 1 청취, 2a/2b PNG 육안, 2c 무작위 청취, 3 할루시네이션 대조, 4 VLC 재생)이 아직 수행되지 않음 — 자동 assert 검증까지만 완료
-- Test Connection에서 Gemini API 키 검증 범위 — 1개 키 테스트로 구현 완료, 다중 키는 §23
+**2026-07-27 정리**: 아래 항목은 "지금 수준(현재 구현/현재 설계)이면 일단 OK"로 확인되어 목록에서 뺐다 — 동명 SRT 덮어쓰기(§13, 확정), VAD 실전 튜닝값, Stage 0 테스트 셋 부재, 자막 가독성 후처리 파라미터. CER 정량 평가 파이프라인은 **진행하지 않기로 결정**해 목록에서 뺐다.
+
 - Managed 모드 좀비 프로세스 감지 로직의 구체 구현 (이전 세션이 남긴 PID 추적)
-- 자막 가독성 후처리(화자 분할·CPS cue 분할)의 파라미터 확정 — [postprocessing.md](postprocessing.md) §12.4 참고
+- 사람이 직접 하는 검증들(Stage 1 청취, 2a/2b PNG 육안, 2c 무작위 청취, 3 할루시네이션 대조, 4 VLC 재생)이 아직 수행되지 않음 — 자동 assert 검증까지만 완료. **당장 별도 검증 절차를 만들지 않고, 실사용하며 발견되는 이슈를 피드백으로 받아 대응한다 (2026-07-27 결정).**
+- Test Connection에서 Gemini API 키 검증 범위 — 1개 키 테스트로 구현 완료, 다중 키 로테이션(§23)은 당장 진행하지 않고 필요해지는 시점에 재검토 (2026-07-27 결정)
+- **번역 기능(§5C, v3.4) — 설계만 확정, 구현 전 실측 필요**: DeepL 왕복 시 `[nnnn]|` 마커의 실제 훼손 패턴(§5C.5는 예상 기반), 문자→토큰 근사 비율과 안전 마진(§5C.6), STT 배치 큐 자동 진행 시 Resume 다이얼로그 생략이 실사용에서 안전한지(§7.1). **설계 자체는 이대로 구현을 진행하고, 구현 후 실사용 테스트에서 문제가 발견되면 그때 논의한다 (2026-07-27 결정).**
+- **번역/후처리 교정 서버 동시 상주 방지** (v3.4, §9) — config-translate.json과 config-stt.json(`text_correction.server`)이 텍스트 LLM 서버 설정을 각자 독립적으로 중복 정의하기로 했다(§9). 원칙 2(VRAM 엄격 관리)상 두 서버를 동시에 띄우지 않아야 하지만, 이는 config 스키마로 강제되지 않고 현재는 사용자 운용(같은 포트를 가리키게 하거나 필요 시점에만 순차 기동)에 맡겨져 있다
 
 ---
 
@@ -1430,6 +1783,20 @@ Stage 1~4 CLI 파이프라인 + PySide6 GUI가 구현 완료되어(2026-07-09 en
 | 5 | (v3.3.1) "이어하기(Resume)"가 Phase A(오디오 추출/VAD/chunk 재기록)를 매번 재실행하던 버그 수정 — 기존 `manifest.json`을 그대로 재사용하도록 변경 (§14.2, §14.3) | Resume 사이 Settings에서 VAD 값이 바뀌면 chunk 경계가 달라져 `preserve_prior_transcriptions()`의 오프셋 매칭이 실패, 이미 끝난 전사 진행분이 조용히 리셋될 수 있었음(§14.2 "config를 바꿔도 진행 중인 job에는 영향이 없다"는 기존 서술과 실제 동작이 어긋나 있었음) |
 
 상세는 [postprocessing.md](postprocessing.md) §11.1/§14A 참고.
+
+### v3.3 → v3.4 (2026-07-27) — 번역 탭 + STT 배치 큐 설계 추가 (미구현)
+
+사용자와의 설계 논의를 거쳐, §23에 향후 확장으로만 등재돼 있던 "번역 자막 생성"을 실제 설계로 확정했다. 이번 버전은 **설계만 반영**하며 코드 변경은 없다.
+
+| # | 변경 | 근거 |
+|---|---|---|
+| 1 | 메인 UI를 STT/번역/후처리 3-탭 구조로 재편 (§7) — 기존 §7 내용은 §7.1 STT 탭으로 이동, 기존 후처리 모달(`gui/srt_postprocess_dialog.py`)은 §7.3 후처리 탭으로 흡수, Settings 버튼은 탭 바깥 상단으로 이동 | 탭 순서가 파이프라인 순서(STT→번역→후처리)를 그대로 반영하도록 함 |
+| 2 | §5C 번역(Translation) 기능 신설 — `[nnnn]|` 시리얼 마커 프로토콜, Preprocess/Copy/Translate/Paste/Merge 5버튼, 배치 처리(context_max_chars 기반), 마커 강인 파싱(공백 삽입·줄바꿈 소실 대응) | 기존에는 화자분할된 SRT를 외부 번역 도구(DeepL 등)에 완전 수동으로 왕복시켜야 했음(§14A). 앱 내 자체 LLM 번역과 외부 도구 왕복을 모두 지원하되, cue 정렬이 깨지지 않는 것이 핵심 요구사항 |
+| 3 | STT 탭에 배치 처리(대기열) 추가 (§7.1) — 작업 중 드롭된 파일 자동 큐잉, 유휴 상태에서 다중 드롭 시 큐만 채우고 Transcript로 일괄 시작, 대기열 자동 진행 시 Resume 다이얼로그 생략(자동 이어하기) | 여러 파일을 순차 처리할 때마다 매번 완료를 기다렸다가 다음 파일을 수동으로 선택해야 했던 불편 해소. 대기열 진행은 STT까지만 자동화하고 번역은 항상 사용자가 명시적으로 트리거하도록 범위를 제한 |
+| 4 | Settings 창에 `번역` 탭 신설 (§8.7) — 번역 대상 언어, 컨텍스트 예산, Preprocess/Translate 프롬프트, 독립 서버 설정(URL/Launch Mode/포트 등, Provider 탭과 동일한 UI 패턴) | §5C 번역 기능의 설정 진입점 |
+| 5 | config.json을 `config-stt.json`/`config-translate.json`/`config-postprocessing.json` 3개 도메인 파일로 분해(§9) — 각 파일이 대응하는 탭의 설정만 담당하고, 기존 "추적되는 example + gitignore되는 실사용" 두 파일 체계는 파일마다 유지. 번역·Phase C 텍스트 교정의 텍스트 LLM 서버 설정은 **파일 간 참조 없이 각자 독립 정의**(당초 §5C.8 초안의 "text_correction.server 재사용" 결정을 뒤집음), Custom Vocabulary·cleanup·logging 같은 전역 설정은 `config-stt.json`에 유지 | 탭 간 결합을 없애는 것이 분해의 목적이므로 서버 설정도 상호 참조 없이 완전히 분리하기로 함(§24에 VRAM 이중 상주 리스크 등재) |
+
+상세는 §5C, §7, §8.7, §9 참고. 구현 착수 전 실측 필요 항목은 §5C.9, §24.
 
 ---
 
