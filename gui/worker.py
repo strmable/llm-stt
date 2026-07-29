@@ -41,7 +41,7 @@ from build_srt import srt_timestamp  # noqa: E402
 from chunk_export import export_chunks, preserve_prior_transcriptions, validate_manifest  # noqa: E402
 from common import job_dir as get_job_dir, read_source_info, write_source_info  # noqa: E402
 from cue_splitter import DEFAULT_GAP_SEC, split_by_speaker_cues  # noqa: E402
-from server_manager import adapt_text_correction_server_config, ensure_llama_server  # noqa: E402
+from server_manager import adapt_flat_server_config, ensure_llama_server  # noqa: E402
 from text_correction import correct_all  # noqa: E402
 from transcribe_chunks import detect_repetition, parse_response  # noqa: E402
 from vad_merge import merge_pipeline  # noqa: E402
@@ -525,7 +525,7 @@ class TranscriptionWorker(QThread):
         server_cfg = tc_cfg.get("server", {})
         server_url = server_cfg.get("url", "http://localhost:8081/v1/chat/completions")
         server_base = server_url.split("/v1/")[0]
-        server_manager_cfg = adapt_text_correction_server_config(server_cfg)
+        server_manager_cfg = adapt_flat_server_config(server_cfg, default_port=8081)
 
         if server_cfg.get("launch_mode", "external") == "managed":
             self.phaseChanged.emit("Phase C: 후처리 서버 준비 중...")

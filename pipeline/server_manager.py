@@ -1,16 +1,22 @@
 """llama-server lifecycle management (design.md SS6.3 Launch Mode: External/Managed).
 
-External (config.json local_api.launch_mode == "external", the default): the
+External (caller's local_api.launch_mode == "external", the default): the
 user already has llama-server running; we only verify /health and use it,
 never touching its lifecycle.
 
 Managed (launch_mode == "managed"): if nothing answers on the configured
-port, launch llama-server ourselves from config.json's local_api section
+port, launch llama-server ourselves from the caller's local_api section
 (subprocess), poll /health until ready (or config's managed.startup_timeout_sec
 elapses), and terminate it again once the `with ensure_llama_server(...)`
 block exits. Per design.md SS6.3's explicit rule, a server that was ALREADY
 up when we checked is reused and left running either way, regardless of
 launch_mode -- we only ever stop a process we ourselves started.
+
+Shared by config-stt.json's own local_api server (STT), and, via
+adapt_flat_server_config(), config-stt.json's
+text_enhancement.text_correction.server (Phase C) and config-translate.json's
+translation.server (§5C.8) -- each an independently-launched process, never
+sharing lifecycle.
 """
 
 import shlex
@@ -34,7 +40,7 @@ def is_server_up(server_url: str, timeout: float = 3.0) -> bool:
 def build_launch_command(local_api: dict) -> list[str]:
     binary = local_api.get("server_binary", "")
     if not binary:
-        raise RuntimeError("config.json local_api.server_binary is empty -- required for managed launch_mode")
+        raise RuntimeError("local_api.server_binary is empty -- required for managed launch_mode")
 
     port = local_api.get("managed", {}).get("port", 8080)
     cmd = [binary, "--host", "127.0.0.1", "--port", str(port)]
@@ -48,7 +54,7 @@ def build_launch_command(local_api: dict) -> list[str]:
     else:
         hf_repo = local_api.get("hf_repo", "")
         if not hf_repo:
-            raise RuntimeError("config.json local_api.model_path and local_api.hf_repo are both empty -- "
+            raise RuntimeError("local_api.model_path and local_api.hf_repo are both empty -- "
                                 "need one of them to know which model to load")
         cmd += ["-hf", hf_repo]
 
@@ -67,23 +73,25 @@ def wait_for_health(server_url: str, timeout_sec: float, poll_interval: float = 
     raise TimeoutError(f"llama-server did not become healthy at {server_url} within {timeout_sec:.0f}s")
 
 
-def adapt_text_correction_server_config(tc_server: dict) -> dict:
-    """`ensure_llama_server` expects config.json's top-level `local_api` shape
-    (managed.port/extra_args/startup_timeout_sec nested). Phase C's server
-    config (config.json text_enhancement.text_correction.server,
-    postprocessing.md SS12.2) stores those flat instead -- adapt rather than
-    duplicate the launch/health-check logic for a second server shape."""
+def adapt_flat_server_config(flat_server: dict, default_port: int = 8081) -> dict:
+    """`ensure_llama_server` expects config-stt.json's top-level `local_api`
+    shape (managed.port/extra_args/startup_timeout_sec nested). Both Phase
+    C's server config (config-stt.json text_enhancement.text_correction.server,
+    postprocessing.md SS12.2) and the translation server config
+    (config-translate.json translation.server, design.md SS5C.8) store those
+    flat instead -- adapt rather than duplicate the launch/health-check logic
+    for a second/third server shape."""
     return {
         "local_api": {
-            "launch_mode": tc_server.get("launch_mode", "external"),
-            "server_binary": tc_server.get("server_binary", ""),
-            "model_path": tc_server.get("model_path", ""),
+            "launch_mode": flat_server.get("launch_mode", "external"),
+            "server_binary": flat_server.get("server_binary", ""),
+            "model_path": flat_server.get("model_path", ""),
             "mmproj_path": "",
             "hf_repo": "",
             "managed": {
-                "port": tc_server.get("port", 8081),
-                "extra_args": tc_server.get("extra_args", ""),
-                "startup_timeout_sec": tc_server.get("startup_timeout_sec", 120),
+                "port": flat_server.get("port", default_port),
+                "extra_args": flat_server.get("extra_args", ""),
+                "startup_timeout_sec": flat_server.get("startup_timeout_sec", 120),
             },
         },
     }

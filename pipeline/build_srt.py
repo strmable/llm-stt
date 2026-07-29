@@ -47,13 +47,19 @@ def parse_srt_timestamp(s: str) -> float:
     return h * 3600 + mi * 60 + sec + ms / 1000
 
 
-def parse_srt(text: str) -> list[dict]:
+def parse_srt(text: str, preserve_newlines: bool = False) -> list[dict]:
     """Parses standard SRT text into {start_sec, end_sec, text} dicts, used by
     the standalone SRT post-processing tool (pipeline/srt_postprocess.py) to
-    read an externally-translated SRT. Multi-line cue text is collapsed to a
-    single line (same normalization as collect_entries() above) since the
-    downstream cue splitter re-flows text on its own boundaries anyway.
-    Blocks with unparseable timing lines are skipped."""
+    read an externally-translated SRT. By default, multi-line cue text is
+    collapsed to a single line (same normalization as collect_entries()
+    above) since the downstream cue splitter re-flows text on its own
+    boundaries anyway. Blocks with unparseable timing lines are skipped.
+
+    `preserve_newlines=True` (design.md SS5C.3, pipeline/translation.py)
+    keeps each cue's internal line breaks instead of collapsing them --
+    the marker protocol only prefixes a cue's *first* line, so a multi-line
+    cue's continuation lines need to stay distinguishable from the next
+    cue's marker line."""
     entries = []
     for block in re.split(r"\r?\n\r?\n", text.strip()):
         lines = [line for line in block.splitlines() if line.strip()]
@@ -65,7 +71,11 @@ def parse_srt(text: str) -> list[dict]:
         m = _TIMING_LINE_RE.search(lines[timing_idx])
         start_sec = parse_srt_timestamp(m.group(0).split("-->")[0])
         end_sec = parse_srt_timestamp(m.group(0).split("-->")[1])
-        body = " ".join(" ".join(lines[timing_idx + 1:]).split())
+        text_lines = lines[timing_idx + 1:]
+        if preserve_newlines:
+            body = "\n".join(text_lines).strip()
+        else:
+            body = " ".join(" ".join(text_lines).split())
         if not body:
             continue
         entries.append({"start_sec": start_sec, "end_sec": end_sec, "text": body})

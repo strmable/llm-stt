@@ -19,7 +19,7 @@ PIPELINE_DIR = REPO_ROOT / "pipeline"
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from common import CONFIG_PATH  # noqa: E402
+from common import CONFIG_STT_PATH, CONFIG_TRANSLATE_PATH, load_translate_config  # noqa: E402
 
 
 def _silence_wav_bytes(seconds: float = 1.0, sample_rate: int = 16000) -> bytes:
@@ -49,6 +49,10 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("설정")
         self.setMinimumWidth(560)
         self.config = json.loads(json.dumps(config))  # deep copy -- Cancel must discard edits
+        # design.md SS9 (v3.4): 번역 탭 is its own config-translate.json domain,
+        # loaded here rather than passed in by the caller (unlike self.config,
+        # which the STT tab already owns/passes).
+        self.translate_config = json.loads(json.dumps(load_translate_config()))
         self._build_ui()
         self._load_from_config()
 
@@ -63,6 +67,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_provider_tab(), "Provider")
         tabs.addTab(self._build_vocabulary_tab(), "용어집")
         tabs.addTab(self._build_postprocessing_tab(), "후처리")
+        tabs.addTab(self._build_translation_tab(), "번역")
         tabs.addTab(self._build_prompt_tab(), "Prompt")
         tabs.addTab(self._build_params_tab(), "모델 파라미터")
 
@@ -173,7 +178,7 @@ class SettingsDialog(QDialog):
 
     def _path_row(self, form: QFormLayout, label: str, is_dir: bool, file_filter: str) -> QLineEdit:
         edit = QLineEdit()
-        browse = QPushButton("찾아보기...")
+        browse = QPushButton("Browse...")
 
         def on_browse():
             if is_dir:
@@ -330,6 +335,126 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tc_box)
         self.text_correction_enabled.toggled.connect(self.tc_box.setEnabled)
         layout.addStretch()
+        return w
+
+    def _wire_prompt_load_save(self, editor: QPlainTextEdit, attr_name: str, btn_row: QHBoxLayout):
+        """Generic Load/Save/Save As wiring for a prompt QPlainTextEdit,
+        tracking its last-used path under `attr_name` on self -- used by the
+        번역 탭's two prompt editors (SS8.7) so the logic isn't duplicated
+        per editor the way the STT Prompt tab's _prompt_* methods are."""
+        setattr(self, attr_name, None)
+        btn_load = QPushButton("Load")
+        btn_save = QPushButton("Save")
+        btn_save_as = QPushButton("Save As")
+
+        def do_load():
+            path, _ = QFileDialog.getOpenFileName(self, "Load Prompt", filter="Text files (*.txt);;All files (*)")
+            if path:
+                editor.setPlainText(Path(path).read_text(encoding="utf-8"))
+                setattr(self, attr_name, Path(path))
+
+        def do_save_as():
+            path, _ = QFileDialog.getSaveFileName(self, "Save Prompt As", filter="Text files (*.txt);;All files (*)")
+            if path:
+                Path(path).write_text(editor.toPlainText(), encoding="utf-8")
+                setattr(self, attr_name, Path(path))
+
+        def do_save():
+            last = getattr(self, attr_name)
+            if last is None:
+                do_save_as()
+                return
+            last.write_text(editor.toPlainText(), encoding="utf-8")
+
+        btn_load.clicked.connect(do_load)
+        btn_save.clicked.connect(do_save)
+        btn_save_as.clicked.connect(do_save_as)
+        btn_row.addWidget(btn_load)
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_save_as)
+
+    def _build_translation_tab(self) -> QWidget:
+        """design.md SS8.7 (v3.4) -- config-translate.json's own server
+        block, independent from the 후처리 탭's text_correction.server
+        (SS5C.8/SS9 "서버 설정을 공유하지 않는 이유")."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        server_box = QGroupBox("번역 서버 (llama-server) -- 후처리(Text Correction) 서버와 완전히 독립")
+        sform = QFormLayout(server_box)
+        self.tr_url = QLineEdit()
+        sform.addRow("API URL", self.tr_url)
+
+        tr_launch_row = QHBoxLayout()
+        self.tr_rb_external = QRadioButton("External")
+        self.tr_rb_managed = QRadioButton("Managed")
+        self.tr_rb_external.setChecked(True)
+        tr_launch_row.addWidget(self.tr_rb_external)
+        tr_launch_row.addWidget(self.tr_rb_managed)
+        sform.addRow("Launch Mode", tr_launch_row)
+
+        self.tr_server_binary = self._path_row(sform, "번역 서버 실행 파일 경로", is_dir=False,
+                                                file_filter="Executable (*.exe);;All files (*)")
+        self.tr_model_path = self._path_row(sform, "모델 파일 경로 (model_path)", is_dir=False,
+                                             file_filter="GGUF (*.gguf);;All files (*)")
+
+        self.tr_port = QSpinBox()
+        self.tr_port.setRange(1, 65535)
+        sform.addRow("포트 (Managed)", self.tr_port)
+        self.tr_extra_args = QLineEdit()
+        sform.addRow("추가 인자 (Managed)", self.tr_extra_args)
+        self.tr_startup_timeout = QSpinBox()
+        self.tr_startup_timeout.setRange(1, 3600)
+        self.tr_startup_timeout.setSuffix(" s")
+        sform.addRow("기동 타임아웃 (Managed)", self.tr_startup_timeout)
+
+        tr_test_row = QHBoxLayout()
+        self.btn_test_tr = QPushButton("Test Connection")
+        self.btn_test_tr.clicked.connect(self._test_tr_connection)
+        tr_test_row.addStretch()
+        tr_test_row.addWidget(self.btn_test_tr)
+        sform.addRow(tr_test_row)
+
+        for rb in (self.tr_rb_external, self.tr_rb_managed):
+            rb.toggled.connect(self._update_tr_managed_enabled)
+        layout.addWidget(server_box)
+
+        opt_box = QGroupBox("번역 옵션")
+        oform = QFormLayout(opt_box)
+        self.tr_target_language = QLineEdit()
+        oform.addRow("출력 언어 (번역 대상)", self.tr_target_language)
+        self.tr_context_max_chars = QSpinBox()
+        self.tr_context_max_chars.setRange(500, 500000)
+        self.tr_context_max_chars.setSingleStep(1000)
+        oform.addRow("컨텍스트 예산 (문자 수, SS5C.6 배치 처리 단위)", self.tr_context_max_chars)
+        layout.addWidget(opt_box)
+
+        layout.addWidget(QLabel("Preprocess 프롬프트"))
+        self.tr_preprocess_prompt_edit = QPlainTextEdit()
+        layout.addWidget(self.tr_preprocess_prompt_edit)
+        preprocess_btn_row = QHBoxLayout()
+        self._wire_prompt_load_save(self.tr_preprocess_prompt_edit, "_last_preprocess_prompt_path",
+                                     preprocess_btn_row)
+        preprocess_btn_row.addStretch()
+        layout.addLayout(preprocess_btn_row)
+
+        layout.addWidget(QLabel("Translate 프롬프트 ({{target_language}}/{{vocabulary}} 치환됨)"))
+        self.tr_translate_prompt_edit = QPlainTextEdit()
+        layout.addWidget(self.tr_translate_prompt_edit)
+        translate_btn_row = QHBoxLayout()
+        self._wire_prompt_load_save(self.tr_translate_prompt_edit, "_last_translate_prompt_path",
+                                     translate_btn_row)
+        translate_btn_row.addStretch()
+        layout.addLayout(translate_btn_row)
+
+        note = QLabel(
+            "이 서버와 후처리(Text Correction) 서버를 동시에 띄우면 VRAM을 이중으로 점유합니다. "
+            "가능하면 같은 URL/포트를 가리키도록 설정하거나, 필요할 때만 순차로 기동하세요."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(note)
+
         return w
 
     def _build_prompt_tab(self) -> QWidget:
@@ -526,9 +651,32 @@ class SettingsDialog(QDialog):
         self.vad_max_absorb_gap.setValue(vad.get("max_absorb_gap", 3.0))
         self.vad_max_chunk.setValue(vad.get("max_chunk", 30.0))
 
+        self._load_translate_tab()
+
         self._update_provider_enabled()
         self._update_managed_enabled()
         self._update_tc_managed_enabled()
+        self._update_tr_managed_enabled()
+
+    def _load_translate_tab(self):
+        cfg = self.translate_config.get("translation", {})
+        server = cfg.get("server", {})
+        self.tr_url.setText(server.get("url", "http://localhost:8082/v1/chat/completions"))
+        self.tr_rb_managed.setChecked(server.get("launch_mode", "external") == "managed")
+        self.tr_rb_external.setChecked(server.get("launch_mode", "external") != "managed")
+        self.tr_server_binary.setText(server.get("server_binary", ""))
+        self.tr_model_path.setText(server.get("model_path", ""))
+        self.tr_port.setValue(server.get("port", 8082))
+        self.tr_extra_args.setText(server.get(
+            "extra_args",
+            "--ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 "
+            "--reasoning-budget 0 --jinja"))
+        self.tr_startup_timeout.setValue(server.get("startup_timeout_sec", 120))
+
+        self.tr_target_language.setText(cfg.get("target_language", "en"))
+        self.tr_context_max_chars.setValue(cfg.get("context_max_chars", 20000))
+        self.tr_preprocess_prompt_edit.setPlainText(cfg.get("preprocess_prompt", ""))
+        self.tr_translate_prompt_edit.setPlainText(cfg.get("translate_prompt", ""))
 
     def to_config(self) -> dict:
         cfg = json.loads(json.dumps(self.config))  # keep untouched keys (logging, etc.)
@@ -623,10 +771,35 @@ class SettingsDialog(QDialog):
         })
         return cfg
 
+    def to_translate_config(self) -> dict:
+        cfg = json.loads(json.dumps(self.translate_config))  # keep untouched keys
+        cfg.setdefault("translation", {})
+        cfg["translation"].update({
+            "target_language": self.tr_target_language.text().strip() or "en",
+            "context_max_chars": self.tr_context_max_chars.value(),
+            "preprocess_prompt": self.tr_preprocess_prompt_edit.toPlainText(),
+            "translate_prompt": self.tr_translate_prompt_edit.toPlainText(),
+            "server": {
+                "url": self.tr_url.text().strip(),
+                "launch_mode": "managed" if self.tr_rb_managed.isChecked() else "external",
+                "server_binary": self.tr_server_binary.text().strip(),
+                "model_path": self.tr_model_path.text().strip(),
+                "port": self.tr_port.value(),
+                "extra_args": self.tr_extra_args.text().strip(),
+                "startup_timeout_sec": self.tr_startup_timeout.value(),
+            },
+        })
+        return cfg
+
     def accept(self):
         cfg = self.to_config()
-        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        CONFIG_STT_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         self.config = cfg
+
+        translate_cfg = self.to_translate_config()
+        CONFIG_TRANSLATE_PATH.write_text(json.dumps(translate_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.translate_config = translate_cfg
+
         super().accept()
 
     # -- behavior ---------------------------------------------------------
@@ -646,6 +819,12 @@ class SettingsDialog(QDialog):
         self.tc_port.setEnabled(managed)
         self.tc_extra_args.setEnabled(managed)
         self.tc_startup_timeout.setEnabled(managed)
+
+    def _update_tr_managed_enabled(self):
+        managed = self.tr_rb_managed.isChecked()
+        self.tr_port.setEnabled(managed)
+        self.tr_extra_args.setEnabled(managed)
+        self.tr_startup_timeout.setEnabled(managed)
 
     def _prompt_load(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Prompt", filter="Text files (*.txt);;All files (*)")
@@ -712,6 +891,27 @@ class SettingsDialog(QDialog):
                 "chat_template_kwargs": {"enable_thinking": False},
             }
             resp = requests.post(tc_server["url"], json=payload, timeout=10)
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            QMessageBox.information(self, "Test Connection", f"OK\n\n{content[:200]}")
+        except Exception as e:  # noqa: BLE001 -- shown to the user, not logged
+            QMessageBox.critical(self, "Test Connection", f"실패: {e}")
+
+    def _test_tr_connection(self):
+        import requests
+        tr_server = self.to_translate_config()["translation"]["server"]
+        if tr_server["launch_mode"] == "managed":
+            missing = [k for k in ("server_binary", "model_path") if not tr_server[k]]
+            if missing:
+                QMessageBox.warning(self, "Test Connection", f"Managed 모드 필수 항목 누락: {', '.join(missing)}")
+                return
+        try:
+            payload = {
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 8,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+            resp = requests.post(tr_server["url"], json=payload, timeout=10)
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             QMessageBox.information(self, "Test Connection", f"OK\n\n{content[:200]}")

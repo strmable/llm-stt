@@ -1,4 +1,4 @@
-"""Main window (design.md SS7)."""
+"""Main window (design.md SS7, v3.4: STT/번역/후처리 3-탭 구조 + STT 배치 큐)."""
 
 import json
 import shutil
@@ -8,8 +8,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -17,10 +18,12 @@ PIPELINE_DIR = REPO_ROOT / "pipeline"
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from common import CONFIG_PATH, TEMP_ROOT, compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
+from common import CONFIG_STT_PATH, TEMP_ROOT, compute_job_id, job_dir as get_job_dir, load_stt_config  # noqa: E402
 
+from .batch_queue import BatchQueue, BatchQueueItem
 from .settings_dialog import SettingsDialog
-from .srt_postprocess_dialog import SrtPostprocessDialog
+from .srt_postprocess_tab import SrtPostprocessTab
+from .translation_tab import TranslationTab
 from .worker import TranscriptionWorker
 
 SUPPORTED_EXTENSIONS = {
@@ -29,18 +32,22 @@ SUPPORTED_EXTENSIONS = {
 }  # extract_audio.py just calls ffmpeg -i, which reads far more than SS4's original
    # example list -- these are the other containers actually asked for/commonly seen.
 
+_QUEUE_STATUS_LABELS = {"waiting": "대기중", "running": "진행중", "done": "완료", "failed": "실패"}
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Media Transcriber")
-        self.resize(760, 560)
+        self.resize(820, 640)
         self.setAcceptDrops(True)
 
-        self.config = load_config()
+        self.config = load_stt_config()
         self.source_path: Path | None = None
         self.worker: TranscriptionWorker | None = None
         self._drop_after_stop = False  # SS14.4 요청: Stop과 별개로 temp/{job_id} 완전 삭제
+        self.queue = BatchQueue()  # SS7.1 STT 배치 큐
+        self._current_item: BatchQueueItem | None = None  # queue item behind the running job, if any
 
         self._build_ui()
         self._update_controls()
@@ -51,6 +58,30 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, stretch=1)
+
+        self.tabs.addTab(self._build_stt_tab(), "STT")
+
+        self.translation_tab = TranslationTab()
+        self.translation_tab.mergedFile.connect(self._on_translation_merged)
+        self.translation_tab.settingsRequested.connect(self._open_settings)
+        self.tabs.addTab(self.translation_tab, "번역")
+
+        self.postprocess_tab = SrtPostprocessTab()
+        self.postprocess_tab.settingsRequested.connect(self._open_settings)
+        self.tabs.addTab(self.postprocess_tab, "후처리")
+
+        # Connected only after all tabs exist -- QTabWidget emits
+        # currentChanged as soon as the first tab is added (index -1 -> 0),
+        # which would fire _on_tab_changed before translation_tab/
+        # postprocess_tab are assigned otherwise.
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _build_stt_tab(self) -> QWidget:
+        w = QWidget()
+        root = QVBoxLayout(w)
 
         file_row = QHBoxLayout()
         file_row.addWidget(QLabel("File :"))
@@ -66,6 +97,15 @@ class MainWindow(QMainWindow):
         self.srt_view.setReadOnly(True)
         self.srt_view.setPlaceholderText("SRT 결과가 여기에 실시간으로 표시됩니다.")
         root.addWidget(self.srt_view, stretch=1)
+
+        # SS7.1 배치 큐 -- 항상 표시, 대기중 항목만 개별 제거 가능.
+        root.addWidget(QLabel("대기열"))
+        self.queue_list = QListWidget()
+        self.queue_list.setMaximumHeight(90)
+        root.addWidget(self.queue_list)
+        self.btn_remove_from_queue = QPushButton("Remove Selected")
+        self.btn_remove_from_queue.clicked.connect(self._on_remove_queue_item_clicked)
+        root.addWidget(self.btn_remove_from_queue)
 
         self.phase_label = QLabel("")
         root.addWidget(self.phase_label)
@@ -92,22 +132,33 @@ class MainWindow(QMainWindow):
         self.btn_start = QPushButton("Transcript")
         self.btn_start.clicked.connect(self._on_start_stop_clicked)
         btn_row.addWidget(self.btn_start)
-        self.btn_cancel = QPushButton("완전 취소 (임시파일 삭제)")
+        self.btn_cancel = QPushButton("Full Cancel (Delete Temp Files)")
         self.btn_cancel.clicked.connect(self._on_cancel_clicked)
         btn_row.addWidget(self.btn_cancel)
         self.btn_copy = QPushButton("Copy")
         self.btn_copy.clicked.connect(self._copy_srt)
         btn_row.addWidget(self.btn_copy)
+        btn_row.addStretch()
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.clicked.connect(self._open_settings)
         btn_row.addWidget(self.btn_settings)
-        self.btn_postprocess = QPushButton("후처리")
-        self.btn_postprocess.clicked.connect(self._open_postprocess)
-        btn_row.addWidget(self.btn_postprocess)
-        btn_row.addStretch()
         root.addLayout(btn_row)
 
-    # -- File selection / drag & drop --------------------------------------
+        return w
+
+    # -- Tab switching (design.md SS7.2/SS7.3 자동 로드 체인) -------------------
+
+    def _on_tab_changed(self, index: int):
+        widget = self.tabs.widget(index)
+        if widget is self.translation_tab:
+            self.translation_tab.activate()
+        elif widget is self.postprocess_tab:
+            self.postprocess_tab.activate()
+
+    def _on_translation_merged(self, path_str: str):
+        self.postprocess_tab.notify_upstream_srt(Path(path_str))
+
+    # -- File selection / drag & drop / batch queue (design.md SS7.1) -------
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -117,17 +168,31 @@ class MainWindow(QMainWindow):
         urls = event.mimeData().urls()
         if not urls:
             return
-        path = Path(urls[0].toLocalFile())
-        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            QMessageBox.warning(self, "지원하지 않는 형식", f"{path.suffix} 형식은 지원하지 않습니다.")
-            return
-        self._set_source(path)
+        paths = [Path(u.toLocalFile()) for u in urls]
+        supported = [p for p in paths if p.suffix.lower() in SUPPORTED_EXTENSIONS]
+        unsupported = [p for p in paths if p.suffix.lower() not in SUPPORTED_EXTENSIONS]
+        if unsupported:
+            names = ", ".join(p.name for p in unsupported)
+            QMessageBox.warning(self, "지원하지 않는 형식", f"다음 파일은 지원하지 않는 형식이라 제외됩니다: {names}")
+        if supported:
+            self._handle_new_files(supported)
 
     def _select_file(self):
         exts = " ".join(f"*{e}" for e in sorted(SUPPORTED_EXTENSIONS))
-        path, _ = QFileDialog.getOpenFileName(self, "파일 선택", filter=f"Media files ({exts});;All files (*)")
-        if path:
-            self._set_source(Path(path))
+        paths, _ = QFileDialog.getOpenFileNames(self, "파일 선택", filter=f"Media files ({exts});;All files (*)")
+        if paths:
+            self._handle_new_files([Path(p) for p in paths])
+
+    def _handle_new_files(self, paths: list[Path]):
+        """SS7.1: idle + single file behaves like pre-v3.4 (plain selection,
+        no queue); everything else (idle + multiple, or any drop while
+        running) appends to the visible queue without auto-starting."""
+        running = self.worker is not None
+        action = self.queue.handle_drop(paths, running=running)
+        if action == "single":
+            self._set_source(paths[0])
+        self._refresh_queue_list()
+        self._update_controls()
 
     def _set_source(self, path: Path):
         self.source_path = path
@@ -135,16 +200,31 @@ class MainWindow(QMainWindow):
         self.file_label.setStyleSheet("")
         self._update_controls()
 
+    def _on_remove_queue_item_clicked(self):
+        list_item = self.queue_list.currentItem()
+        if list_item is None:
+            return
+        item = list_item.data(Qt.UserRole)
+        self.queue.remove(item)
+        self._refresh_queue_list()
+        self._update_controls()
+
+    def _refresh_queue_list(self):
+        self.queue_list.clear()
+        for item in self.queue.items:
+            label = f"{_QUEUE_STATUS_LABELS.get(item.status, item.status)}   {item.path.name}"
+            list_item = QListWidgetItem(label)
+            list_item.setData(Qt.UserRole, item)
+            self.queue_list.addItem(list_item)
+
     # -- Controls -----------------------------------------------------------
 
     def _update_controls(self):
         running = self.worker is not None
-        self.btn_start.setEnabled(self.source_path is not None)
+        can_start = self.source_path is not None or self.queue.next_waiting() is not None
+        self.btn_start.setEnabled(running or can_start)
         self.btn_settings.setEnabled(not running)
-        if running:
-            self.btn_start.setText("Stop")
-        else:
-            self.btn_start.setText("Transcript")
+        self.btn_start.setText("Stop" if running else "Transcript")
         self.btn_cancel.setEnabled(self.source_path is not None and (running or self._job_dir_exists()))
 
     def _job_dir_exists(self) -> bool:
@@ -166,34 +246,67 @@ class MainWindow(QMainWindow):
         if path.exists():
             shutil.rmtree(path)
 
+    # -- Job start/stop (design.md SS7.1 manual vs auto-advance) -------------
+
     def _on_start_stop_clicked(self):
         if self.worker is not None:
             self._request_stop()
         else:
-            self._start_job()
+            self._start_next_manual()
 
-    def _start_job(self):
-        assert self.source_path is not None
-        job_dir_path = get_job_dir(self.source_path)
-        resume = False
-        if (job_dir_path / "manifest.json").exists():
-            box = QMessageBox(self)
-            box.setWindowTitle("이전 작업 발견")
-            box.setText("이전 작업을 발견했습니다. 이어서 진행하시겠습니까?")
-            btn_resume = box.addButton("이어하기", QMessageBox.AcceptRole)
-            box.addButton("새로 시작", QMessageBox.DestructiveRole)
-            btn_cancel = box.addButton("취소", QMessageBox.RejectRole)
-            box.exec()
-            if box.clickedButton() is btn_cancel:
+    def _start_next_manual(self):
+        """User clicked [Transcript]: prefer the plain single-file selection
+        (pre-v3.4 behavior), else start the next queued item manually --
+        either way, a manually-started job still shows the Resume 3-button
+        dialog if a previous temp exists (design.md SS7.1)."""
+        path = self.source_path
+        if path is None:
+            item = self.queue.next_waiting()
+            if item is None:
                 return
-            resume = box.clickedButton() is btn_resume
+            path = item.path
+        self._begin_job(path, manual=True)
 
-        self.config = load_config()  # pick up any Settings changes since launch
+    def _resolve_resume(self, path: Path, manual: bool) -> tuple[bool, bool]:
+        """Returns (proceed, resume). A manually-started job with an existing
+        temp shows the 3-button dialog (may cancel -> proceed=False); an
+        auto-advanced queue item with an existing temp always resumes
+        silently (design.md SS7.1 "무인 배치 처리가 목적")."""
+        job_dir_path = get_job_dir(path)
+        has_existing = (job_dir_path / "manifest.json").exists()
+        if not has_existing:
+            return True, False
+        if not manual:
+            return True, True
+        box = QMessageBox(self)
+        box.setWindowTitle("이전 작업 발견")
+        box.setText("이전 작업을 발견했습니다. 이어서 진행하시겠습니까?")
+        btn_resume = box.addButton("Resume", QMessageBox.AcceptRole)
+        box.addButton("Start Over", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is btn_cancel:
+            return False, False
+        return True, box.clickedButton() is btn_resume
+
+    def _begin_job(self, path: Path, manual: bool):
+        proceed, resume = self._resolve_resume(path, manual)
+        if not proceed:
+            return
+
+        item = next((it for it in self.queue.items if it.path == path and it.status == "waiting"), None)
+        if item is not None:
+            self.queue.start(item)
+        self._current_item = item
+        self.queue.clear_stopped()  # a fresh manual/auto start un-halts the queue
+
+        self._set_source(path)
+        self.config = load_stt_config()  # pick up any Settings changes since launch
         self.srt_view.clear()
         self.progress_bar.setValue(0)
         self.phase_label.setText("시작 중...")
 
-        self.worker = TranscriptionWorker(self.source_path, self.config, resume)
+        self.worker = TranscriptionWorker(path, self.config, resume)
         self.worker.phaseChanged.connect(self.phase_label.setText)
         self.worker.progressChanged.connect(self._on_progress)
         self.worker.srtUpdated.connect(self._on_srt_updated)
@@ -202,11 +315,13 @@ class MainWindow(QMainWindow):
         self.worker.jobFailed.connect(self._on_job_failed)
         self.worker.jobStopped.connect(self._on_job_stopped)
         self.worker.start()
+        self._refresh_queue_list()
         self._update_controls()
 
     def _request_stop(self):
         if self.worker is not None:
             self.worker.request_stop()
+            self.queue.stop()  # SS7.1: Stop halts auto-advance too, queue stays intact
             self.phase_label.setText("중단 요청됨 -- 현재 chunk 완료 후 정지합니다...")
             self.btn_start.setEnabled(False)
 
@@ -243,6 +358,27 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._update_controls()
 
+    def _finish_current_item_after_stop(self, cancelled: bool):
+        if self._current_item is None:
+            return
+        if cancelled:
+            # 완전 취소: temp already deleted, nothing left to resume -- drop
+            # it from the queue entirely rather than leaving a dead entry.
+            self.queue.items = [it for it in self.queue.items if it is not self._current_item]
+        else:
+            # plain Stop: temp is preserved, put it back to "waiting" so a
+            # later manual [Transcript] click (or a future auto-advance) can
+            # pick it up again.
+            self._current_item.status = "waiting"
+
+    def _maybe_auto_advance(self):
+        self._refresh_queue_list()
+        self._update_controls()
+        if self.worker is not None or not self.queue.should_auto_advance():
+            return
+        next_item = self.queue.next_waiting()
+        self._begin_job(next_item.path, manual=False)
+
     # -- Worker signal handlers -----------------------------------------------
 
     def _on_progress(self, done: int, total: int):
@@ -258,21 +394,36 @@ class MainWindow(QMainWindow):
 
     def _on_job_finished(self, output_srt: str):
         self.phase_label.setText(f"완료: {output_srt}")
+        if self._current_item is not None:
+            self.queue.finish(self._current_item, success=True)
+        self._current_item = None
+        self.translation_tab.notify_upstream_srt(Path(output_srt))
         self._cleanup_worker()
+        self._maybe_auto_advance()
 
     def _on_job_failed(self, message: str):
         self.phase_label.setText("오류 발생")
+        if self._current_item is not None:
+            self.queue.finish(self._current_item, success=False)
+        self._current_item = None
         QMessageBox.critical(self, "작업 실패", message)
         self._cleanup_worker()
+        self._maybe_auto_advance()
 
     def _on_job_stopped(self):
         if self._drop_after_stop:
             self._drop_after_stop = False
             self._drop_job_dir()
             self.phase_label.setText("취소됨 (임시 파일 삭제됨)")
+            self._finish_current_item_after_stop(cancelled=True)
         else:
             self.phase_label.setText("중단됨 (재시작 시 이어서 진행 가능)")
+            self._finish_current_item_after_stop(cancelled=False)
+        self._current_item = None
         self._cleanup_worker()
+        self._refresh_queue_list()
+        # no auto-advance here -- self.queue.stop() (set in _request_stop)
+        # already halts it; user must press [Transcript] again (SS7.1).
 
     # -- Misc buttons ---------------------------------------------------------
 
@@ -283,19 +434,14 @@ class MainWindow(QMainWindow):
         language = self.language_combo.currentText().strip() or "auto"
         if self.config.get("language", "auto") == language:
             return
-        self.config = load_config()
+        self.config = load_stt_config()
         self.config["language"] = language
-        CONFIG_PATH.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+        CONFIG_STT_PATH.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _open_settings(self):
         dialog = SettingsDialog(self.config, self)
         if dialog.exec():
             self.config = dialog.config
-
-    def _open_postprocess(self):
-        dialog = SrtPostprocessDialog(self.config, self)
-        dialog.exec()
-        self.config = load_config()  # pick up srt_postprocess options saved by the dialog
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

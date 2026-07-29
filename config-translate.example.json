@@ -1,0 +1,20 @@
+{
+  "translation": {
+    "target_language": "en",
+    "context_max_chars": 20000,
+
+    "preprocess_prompt": "다음은 음성 인식(STT) 결과를 정리한 자막 원문입니다. 각 cue는 `[nnnn]|` 형식의 마커로 시작합니다.\n마커는 절대 수정하거나 삭제하지 말고 그대로 출력하세요.\n각 cue의 의미를 바꾸지 않는 선에서 구어체 filler, 반복, 비문을 자연스러운 문장으로 다듬으세요.\ncue의 순서와 개수를 유지하세요.",
+
+    "translate_prompt": "다음은 자막 원문입니다. 각 cue는 `[nnnn]|` 형식의 마커로 시작합니다.\n마커는 절대 수정하거나 삭제하지 말고 그대로 출력하세요.\n각 cue를 {{target_language}}로 자연스럽게 번역하세요.\n{{vocabulary}}cue의 순서와 개수를 유지하세요.",
+
+    "server": {
+      "url": "http://localhost:8082/v1/chat/completions",
+      "launch_mode": "external",
+      "server_binary": "",
+      "model_path": "",
+      "port": 8082,
+      "extra_args": "--ctx-size 32768 --parallel 1 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-budget 0 --jinja",
+      "startup_timeout_sec": 120
+    }
+  }
+}

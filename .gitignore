@@ -1,7 +1,12 @@
 # Live app config -- may end up holding a real Gemini API key or local
 # server/model paths once someone actually fills in Settings (design.md SS9).
-# config.example.json (tracked) documents the schema/safe defaults instead.
+# The *.example.json files (tracked) document the schema/safe defaults instead.
+# config.json is the pre-v3.4 legacy file, kept gitignored too since
+# migrate_legacy_config_if_needed() (pipeline/common.py) reads it in place.
 /config.json
+/config-stt.json
+/config-translate.json
+/config-postprocessing.json
 
 # Local test audio samples/recordings (not part of the repo)
 *.m4a

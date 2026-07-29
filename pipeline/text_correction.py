@@ -22,8 +22,8 @@ from pathlib import Path
 
 import requests
 
-from common import load_config
-from server_manager import adapt_text_correction_server_config, ensure_llama_server
+from common import load_stt_config
+from server_manager import adapt_flat_server_config, ensure_llama_server
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -283,16 +283,16 @@ def main():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     job_dir = manifest_path.parent
 
-    config = load_config()
+    config = load_stt_config()
     tc_cfg = config.get("text_enhancement", {}).get("text_correction", {})
     if not tc_cfg.get("enabled", False):
-        sys.exit("text_enhancement.text_correction.enabled is false in config.json -- nothing to do")
+        sys.exit("text_enhancement.text_correction.enabled is false in config-stt.json -- nothing to do")
 
     server_url = tc_cfg.get("server", {}).get(
         "url", "http://localhost:8081/v1/chat/completions")
     server_base = server_url.split("/v1/")[0]
 
-    tc_config_for_server = adapt_text_correction_server_config(tc_cfg.get("server", {}))
+    tc_config_for_server = adapt_flat_server_config(tc_cfg.get("server", {}), default_port=8081)
     with ensure_llama_server(server_base, tc_config_for_server, log_path=job_dir / "llama-server-tc.log"):
         correct_all(manifest, job_dir, tc_cfg, server_url)
 

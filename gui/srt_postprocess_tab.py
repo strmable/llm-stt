@@ -1,12 +1,14 @@
-"""Standalone SRT post-processing modal (postprocessing.md SS11 2차 분할,
-design.md SS7/SS8.4).
+"""후처리 탭 (postprocessing.md SS11 2차 분할, design.md SS7.3/SS8.4).
 
 Runs the CPS-based length-splitting step of the Cue Splitter against an
-externally-translated SRT file, independently of the main Transcript job --
-this is deliberately a separate manual tool from automatic Phase C (which
-only does speaker-marker splitting, gui/worker.py's `_phase_c()`), because
-splitting by length before translation would hand the translator sentence
-fragments instead of whole sentences.
+externally-translated (or 번역 탭에서 Merge된) SRT file, independently of the
+main Transcript job/번역 탭 -- this is deliberately a separate step from
+automatic Phase C (which only does speaker-marker splitting, gui/worker.py's
+`_phase_c()`), because splitting by length before translation would hand the
+translator sentence fragments instead of whole sentences.
+
+v3.4 (design.md SS7.3): absorbed from the standalone `SrtPostprocessDialog`
+modal into a tab -- same logic, embeddable QWidget instead of QDialog.
 """
 
 import json
@@ -16,9 +18,9 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
-    QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QVBoxLayout,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +28,7 @@ PIPELINE_DIR = REPO_ROOT / "pipeline"
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from common import CONFIG_PATH  # noqa: E402
+from common import CONFIG_POSTPROCESSING_PATH, load_postprocessing_config  # noqa: E402
 from srt_postprocess import DEFAULT_CUE_CFG, postprocess_srt_text  # noqa: E402
 
 
@@ -44,7 +46,7 @@ class SrtPostprocessWorker(QThread):
     def run(self):
         try:
             self._run()
-        except Exception as e:  # noqa: BLE001 -- surfaced to the dialog, not swallowed
+        except Exception as e:  # noqa: BLE001 -- surfaced to the tab, not swallowed
             self.failed.emit(str(e))
 
     def _run(self):
@@ -64,18 +66,24 @@ class SrtPostprocessWorker(QThread):
         self.finished_ok.emit(str(self.input_path), str(backup_path))
 
 
-class SrtPostprocessDialog(QDialog):
-    """design.md SS7 -- "후처리" button next to Settings, opens this modal.
-    Flow: SRT 파일 선택 -> 옵션(CPS/길이/gap) -> 실행 -> 로그 출력."""
+class SrtPostprocessTab(QWidget):
+    """design.md SS7.3 -- CPS 기준 길이 분할(2차 분할)만 실행하는 후처리 탭.
+    Flow: SRT 파일 선택(자동 로드 또는 직접 선택/드래그) -> 옵션(CPS/길이/gap)
+    -> 실행 -> 로그 출력. STT/번역 탭과 무관하게 항상 독립적으로 조작 가능."""
 
-    def __init__(self, config: dict, parent=None):
+    settingsRequested = Signal()
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("SRT 후처리 (길이 분할)")
-        self.resize(560, 480)
         self.setAcceptDrops(True)
-        self.config = config
+        # design.md SS9.4: srt_postprocess is the one config domain that
+        # doesn't go through the Settings dialog -- this widget owns
+        # config-postprocessing.json directly.
+        self.config = load_postprocessing_config()
         self.input_path: Path | None = None
         self.worker: SrtPostprocessWorker | None = None
+        self._pending_auto_path: Path | None = None
+        self._user_loaded = False
 
         self._build_ui()
         self._load_from_config()
@@ -86,9 +94,9 @@ class SrtPostprocessDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "외부 도구로 번역까지 마친 SRT 파일을 선택해, 한 화면에 너무 오래 표시되는 "
-            "대사를 CPS(초당 문자수) 기준으로 여러 cue로 나눕니다. 원본은 같은 위치에 "
-            "\"{파일명}.srt.bak\"으로 백업된 뒤, 같은 파일명으로 결과가 저장됩니다."
+            "번역까지 마친 SRT 파일을 선택해, 한 화면에 너무 오래 표시되는 대사를 CPS(초당 문자수) "
+            "기준으로 여러 cue로 나눕니다. 원본은 같은 위치에 \"{파일명}.srt.bak\"으로 백업된 뒤, "
+            "같은 파일명으로 결과가 저장됩니다."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color: gray; font-size: 11px;")
@@ -100,7 +108,7 @@ class SrtPostprocessDialog(QDialog):
         self.file_edit.setReadOnly(True)
         self.file_edit.setPlaceholderText("(번역 완료된 .srt 파일을 선택하거나 여기로 드래그하세요)")
         file_row.addWidget(self.file_edit, stretch=1)
-        self.btn_select = QPushButton("파일 선택")
+        self.btn_select = QPushButton("Select File")
         self.btn_select.clicked.connect(self._select_file)
         file_row.addWidget(self.btn_select)
         layout.addLayout(file_row)
@@ -131,7 +139,7 @@ class SrtPostprocessDialog(QDialog):
         opt_form.addRow("분할된 cue 간 대기시간 (sec)", self.gap_sec)
         layout.addWidget(opt_box)
 
-        self.btn_run = QPushButton("실행")
+        self.btn_run = QPushButton("Run")
         self.btn_run.setEnabled(False)
         self.btn_run.clicked.connect(self._on_run_clicked)
         layout.addWidget(self.btn_run)
@@ -148,9 +156,9 @@ class SrtPostprocessDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self.btn_close = QPushButton("닫기")
-        self.btn_close.clicked.connect(self.reject)
-        btn_row.addWidget(self.btn_close)
+        self.btn_settings = QPushButton("Settings")
+        self.btn_settings.clicked.connect(self.settingsRequested.emit)
+        btn_row.addWidget(self.btn_settings)
         layout.addLayout(btn_row)
 
     def _load_from_config(self):
@@ -171,17 +179,34 @@ class SrtPostprocessDialog(QDialog):
         }
 
     def _save_to_config(self):
-        cfg = json.loads(json.dumps(self.config))
-        cfg["srt_postprocess"] = self._current_cue_cfg()
-        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        cfg = {"srt_postprocess": self._current_cue_cfg()}
+        CONFIG_POSTPROCESSING_PATH.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         self.config = cfg
 
-    # -- File selection / drag & drop ------------------------------------
+    # -- File selection / drag & drop / auto-load chain (design.md SS7.3) ----
+
+    def is_running(self) -> bool:
+        return self.worker is not None and self.worker.isRunning()
+
+    def notify_upstream_srt(self, path: Path):
+        """Called by MainWindow right after 번역 탭's Merge succeeds --
+        remembers the path but only loads it once this tab is actually
+        switched to (SS7.3 "직전 탭 산출물 자동 로드"), and never overrides a
+        file the user picked themselves (mirrors TranslationTab)."""
+        self._pending_auto_path = Path(path)
+
+    def activate(self):
+        """Called by MainWindow when this tab becomes the current tab."""
+        if self._pending_auto_path is not None and not self._user_loaded and not self.is_running():
+            self._set_source(self._pending_auto_path)
+        self._pending_auto_path = None
 
     def _select_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "SRT 파일 선택", filter="SRT files (*.srt);;All files (*)")
         if not path:
             return
+        self._user_loaded = True
         self._set_source(Path(path))
 
     def _set_source(self, path: Path):
@@ -194,7 +219,7 @@ class SrtPostprocessDialog(QDialog):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
-        if self.worker is not None and self.worker.isRunning():
+        if self.is_running():
             return
         urls = event.mimeData().urls()
         if not urls:
@@ -203,6 +228,7 @@ class SrtPostprocessDialog(QDialog):
         if path.suffix.lower() != ".srt":
             QMessageBox.warning(self, "지원하지 않는 형식", f"{path.suffix} 형식은 지원하지 않습니다. .srt 파일을 선택하세요.")
             return
+        self._user_loaded = True
         self._set_source(path)
 
     # -- Run ------------------------------------------------------------------
@@ -252,11 +278,3 @@ class SrtPostprocessDialog(QDialog):
             self.worker.wait()
         self.worker = None
         self._set_controls_enabled(True)
-
-    # -- behavior ---------------------------------------------------------
-
-    def reject(self):
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(self, "실행 중", "후처리가 끝난 뒤 닫을 수 있습니다.")
-            return
-        super().reject()

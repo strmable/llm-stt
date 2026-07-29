@@ -28,7 +28,7 @@ if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
 from build_srt import parse_srt, render_srt  # noqa: E402
-from common import load_config  # noqa: E402
+from common import load_postprocessing_config  # noqa: E402
 from cue_splitter import DEFAULT_GAP_SEC, split_long_cue  # noqa: E402
 
 DEFAULT_CUE_CFG = {
@@ -101,18 +101,19 @@ def main():
     ap.add_argument("input", type=Path, help="translated .srt file to length-split")
     ap.add_argument("--output", type=Path, default=None,
                      help="output path (default: overwrite input, backing up the original as {input}.bak)")
-    ap.add_argument("--cps", type=float, default=None, help="CPS threshold (default: config.json srt_postprocess)")
+    ap.add_argument("--cps", type=float, default=None,
+                     help="CPS threshold (default: config-postprocessing.json srt_postprocess)")
     ap.add_argument("--max-duration", type=float, default=None, dest="max_duration")
     ap.add_argument("--min-duration", type=float, default=None, dest="min_duration")
     ap.add_argument("--max-chars", type=int, default=None, dest="max_chars",
-                     help="max raw characters per cue (default: config.json srt_postprocess, else 40)")
+                     help="max raw characters per cue (default: config-postprocessing.json srt_postprocess, else 40)")
     ap.add_argument("--gap", type=float, default=None, help="gap seconds between split cues")
     args = ap.parse_args()
 
     if not args.input.exists():
         sys.exit(f"input SRT not found: {args.input}")
 
-    cue_cfg = {**DEFAULT_CUE_CFG, **load_config().get("srt_postprocess", {})}
+    cue_cfg = {**DEFAULT_CUE_CFG, **load_postprocessing_config().get("srt_postprocess", {})}
     if args.cps is not None:
         cue_cfg["cps_threshold"] = args.cps
     if args.max_duration is not None:

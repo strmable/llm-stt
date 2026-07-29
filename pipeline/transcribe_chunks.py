@@ -28,7 +28,7 @@ from pathlib import Path
 
 import requests
 
-from common import load_config
+from common import load_stt_config
 from server_manager import ensure_llama_server
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -165,7 +165,7 @@ def main():
     print(f"[transcribe] {len(todo)}/{len(chunks)} chunk(s) to process "
           f"({'--force: re-transcribing all' if args.force else 'skipping already-transcribed'})")
 
-    config = load_config()
+    config = load_stt_config()
     # design.md SS6.3: server lifecycle is scoped to "Phase B" -- started (if
     # managed) right before this loop, torn down right after, not held for
     # the whole run_transcript.py invocation.

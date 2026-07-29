@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 PIPELINE_DIR = REPO_ROOT / "pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
-from common import compute_job_id, job_dir as get_job_dir, load_config  # noqa: E402
+from common import compute_job_id, job_dir as get_job_dir, load_stt_config  # noqa: E402
 from server_manager import is_server_up  # noqa: E402
 
 # line_buffering=True: without it, stdout is fully block-buffered whenever
@@ -81,11 +81,11 @@ def main():
     # mode transcribe_chunks.py starts it itself right before Stage 3
     # (design.md SS6.3: server lifecycle is scoped to Phase B, not the whole
     # job), so there's nothing useful to check this early in that case.
-    launch_mode = load_config().get("local_api", {}).get("launch_mode", "external")
+    launch_mode = load_stt_config().get("local_api", {}).get("launch_mode", "external")
     if launch_mode != "managed" and not is_server_up(args.server):
         sys.exit(f"llama-server not reachable at {args.server} and local_api.launch_mode is "
                  f"{launch_mode!r} (not \"managed\") -- start it first (SETUP.MD SS2/TESTING.md SS1), "
-                 f"or set local_api.launch_mode to \"managed\" in config.json.")
+                 f"or set local_api.launch_mode to \"managed\" in config-stt.json.")
 
     job_id = compute_job_id(args.source)
     job_dir_path = get_job_dir(args.source)
@@ -111,7 +111,7 @@ def main():
         build_args += ["--output", str(args.output)]
     run_stage("build_srt.py", build_args)
 
-    remove_on_success = load_config().get("cleanup", {}).get("remove_temp_on_success", True)
+    remove_on_success = load_stt_config().get("cleanup", {}).get("remove_temp_on_success", True)
     if args.keep_temp:
         print(f"\n[run_transcript] --keep-temp set, leaving {job_dir_path} in place")
     elif not remove_on_success:
